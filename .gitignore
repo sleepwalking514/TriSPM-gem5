@@ -8,7 +8,6 @@ cscope.out
 *~
 .*.swp
 .*.swo
-m5out
 /src/doxygen/html
 /docs/_build
 /ext/dramsim2/DRAMSim2
@@ -36,3 +35,4 @@ configs/dram/lowp_sweep.cfg
 .vscode
 typings
 .DS_Store
+*.deb
