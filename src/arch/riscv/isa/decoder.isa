@@ -6360,6 +6360,24 @@ decode QUADRANT default Unknown::unknown() {
             }
         }
 
+        // Xspm: custom-0 opcode (0x0B), OPCODE5 = 0x02
+        0x02: decode FUNCT3 {
+            // spm.dma rd, rs1, rs2 -- initiate async DMA
+            //   rd  = SPM destination address (echoed back)
+            //   rs1 = DRAM source address
+            //   rs2 = byte count
+            0x0: SpmDmaOp::spm_dma({{
+                spmDmaStartCopy(Rs1, Rd, Rs2);
+                Rd = Rd;
+            }});
+            // spm.dma.w -- wait for DMA completion
+            // Implemented as a Load from the STATUS register;
+            // SpmDmaEngine delays the response until DMA is done.
+            0x1: SpmDmaWaitOp::spm_dma_w({{
+                Rd_sd = Mem_sd;
+            }});
+        }
+
         0x1e: M5Op::M5Op();
     }
 }

@@ -1,0 +1,42 @@
+// -*- mode:c++ -*-
+
+// Xspm extension -- scratchpad DMA instructions.
+// Uses custom-0 opcode space (OPCODE5 = 0x02, full opcode = 0x0B).
+//
+// Instruction encoding:
+//   spm.dma rd, rs1, rs2   R-type  funct3=0x0   Initiate async DMA
+//   spm.dma.w              I-type  funct3=0x1   Wait for DMA completion
+
+// spm.dma: R-type, reads Rs1 (DRAM source), Rs2 (byte count),
+// Rd is both input (SPM destination address) and output (echoed back).
+// Starts an async DMA transfer via the SpmDmaEngine.
+def format SpmDmaOp(code, *opt_flags) {{
+    iop = InstObjParams(name, Name, 'SpmDma', code,
+        ['IsNonSpeculative'])
+    header_output = BasicDeclare.subst(iop)
+    decoder_output = BasicConstructor.subst(iop)
+    decode_block = BasicDecode.subst(iop)
+    exec_output = BasicExecute.subst(iop)
+}};
+
+// spm.dma.w: implemented as a Load from the DMA STATUS register.
+// The SpmDmaEngine delays the response until the DMA is complete,
+// so the CPU naturally stalls on this instruction.
+//
+// IsNonSpeculative: only issue this load when it reaches the ROB head,
+//   guaranteeing that the prior spm.dma has committed and the DMA has
+//   actually started before we read the STATUS register.
+// IsSerializeBefore: drain the pipeline first so all prior stores
+//   (which provide the DMA source data) have reached memory.
+// IsSerializeAfter: block subsequent instructions until this commits,
+//   ensuring DMA destination data is visible before any consumer loads.
+def format SpmDmaWaitOp(memacc_code,
+        ea_code={{EA = 0xF0000018ULL;}},
+        offset_code={{;}},
+        mem_flags=[], inst_flags=[]) {{
+    inst_flags += ['IsNonSpeculative', 'IsSerializeBefore',
+                   'IsSerializeAfter']
+    (header_output, decoder_output, decode_block, exec_output) = \
+        LoadStoreBase(name, Name, offset_code, ea_code, memacc_code,
+        mem_flags, inst_flags, 'SpmDmaWait', exec_template_base='Load')
+}};

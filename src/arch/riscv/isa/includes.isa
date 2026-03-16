@@ -51,6 +51,7 @@ output header {{
 #include "arch/riscv/insts/compressed.hh"
 #include "arch/riscv/insts/mem.hh"
 #include "arch/riscv/insts/pseudo.hh"
+#include "arch/riscv/insts/spm.hh"
 #include "arch/riscv/insts/standard.hh"
 #include "arch/riscv/insts/static_inst.hh"
 #include "arch/riscv/insts/unknown.hh"
@@ -120,6 +121,7 @@ output exec {{
 #include "sim/sim_events.hh"
 #include "sim/sim_exit.hh"
 #include "sim/system.hh"
+#include "scratchpad_mem/spm_dma_iface.hh"
 
 namespace gem5::RiscvISAInst
 {

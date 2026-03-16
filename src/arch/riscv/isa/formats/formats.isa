@@ -46,6 +46,9 @@
 // Include formats for nonstandard extensions
 ##include "compressed.isa"
 
+// SPM (scratchpad memory) extension
+##include "spm.isa"
+
 // Pseudo operations
 ##include "m5ops.isa"
 
