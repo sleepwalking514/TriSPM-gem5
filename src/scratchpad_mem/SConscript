@@ -1,0 +1,9 @@
+Import("*")
+
+SimObject("ScratchpadMemory.py", sim_objects=["ScratchpadMemory"])
+SimObject("SpmDmaEngine.py", sim_objects=["SpmDmaEngine"])
+
+Source("scratchpad_memory.cc")
+Source("spm_dma_engine.cc")
+
+DebugFlag("SpmDma", "SPM DMA engine debug messages")

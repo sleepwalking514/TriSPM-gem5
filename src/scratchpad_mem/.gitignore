@@ -1,0 +1,7 @@
+m5out/
+test/*.o
+test/cache_gemm
+test/spm_gemm
+test/spm_gemmX
+test/spm_gemmY
+test/spm_xinsn_test
