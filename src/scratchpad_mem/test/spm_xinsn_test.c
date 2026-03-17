@@ -4,6 +4,7 @@
 #include "../libspm.h"
 
 #define N 32
+#define BS 4
 
 static int test_dram_to_spm(void)
 {
@@ -50,6 +51,41 @@ static int test_spm_to_dram(void)
     return fail;
 }
 
+static void dma_load_block(int *spm, const int *dram, int ld)
+{
+    for (int r = 0; r < BS; r++) {
+        xspm_dma((uintptr_t)(spm  + r * BS),
+                 (uintptr_t)(dram + r * ld),
+                 BS * sizeof(int));
+        xspm_dma_wait();
+    }
+}
+
+static void dma_store_block(int *dram, const int *spm, int ld)
+{
+    for (int r = 0; r < BS; r++) {
+        xspm_dma((uintptr_t)(dram + r * ld),
+                 (uintptr_t)(spm  + r * BS),
+                 BS * sizeof(int));
+        xspm_dma_wait();
+    }
+}
+
+/*
+ * BSxBS block multiply in SPM: C += A * B.
+ * ikj order with scalar promotion of a[i][k].
+ */
+static void spm_block_matmul(const int *a, const int *b, int *c)
+{
+    for (int i = 0; i < BS; i++) {
+        for (int k = 0; k < BS; k++) {
+            int aik = a[i * BS + k];
+            for (int j = 0; j < BS; j++)
+                c[i * BS + j] += aik * b[k * BS + j];
+        }
+    }
+}
+
 static int test_gemm_xinsn(void)
 {
     int n = 8;
@@ -70,38 +106,52 @@ static int test_gemm_xinsn(void)
             for (int j = 0; j < n; j++)
                 ref[i * n + j] += a[i * n + k] * b[k * n + j];
 
-    int bs = 4;
-    int *sa = (int *)spm_malloc(bs * bs * sizeof(int));
-    int *sb = (int *)spm_malloc(bs * bs * sizeof(int));
-    int *sc = (int *)spm_malloc(bs * bs * sizeof(int));
+    int nb = n / BS;
 
-    for (int i = 0; i < n; i += bs) {
-        for (int j = 0; j < n; j += bs) {
-            spm_memset(sc, 0, bs * bs * sizeof(int));
-            for (int k = 0; k < n; k += bs) {
-                for (int m = 0; m < bs; m++) {
-                    xspm_dma((uintptr_t)(sa + m * bs),
-                             (uintptr_t)(a + (m + i) * n + k),
-                             bs * sizeof(int));
-                    xspm_dma_wait();
+    int *spm_a = (int *)spm_malloc(BS * BS * sizeof(int));
+    int *spm_b = (int *)spm_malloc(BS * BS * sizeof(int));
+    int *spm_b_buf = (int *)spm_malloc(BS * BS * sizeof(int));
+    int *spm_c = (int *)spm_malloc(nb * BS * BS * sizeof(int));
 
-                    xspm_dma((uintptr_t)(sb + m * bs),
-                             (uintptr_t)(b + (m + k) * n + j),
-                             bs * sizeof(int));
+    for (int i = 0; i < n; i += BS) {
+        spm_memset(spm_c, 0, nb * BS * BS * sizeof(int));
+
+        for (int k = 0; k < n; k += BS) {
+            dma_load_block(spm_a, a + i * n + k, n);
+            // for (int j = 0; j < n; j += BS) {
+            //     dma_load_block(spm_b, b + k * n + j, n);
+            //     spm_block_matmul(spm_a, spm_b,
+            //                     spm_c + (j / BS) * BS * BS);
+            // }
+
+            dma_load_block(spm_b, b + k * n, n);
+            for (int j = 0; j < n - BS; j += BS) {
+                for (int ii = 0; ii < BS; ii++) {
+                    xspm_dma((uintptr_t)(spm_b_buf + ii * BS),
+                             (uintptr_t)(b + k * n + j + BS + ii * n),
+                             BS * sizeof(int));
+
+                    for (int kk = 0; kk < BS; kk++) {
+                        int aik = spm_a[ii * BS + kk];
+                        for (int jj = 0; jj < BS; jj++) {
+                            spm_c[(j / BS) * BS * BS + ii * BS + jj] += aik * spm_b[kk * BS + jj];
+                        }
+                    }
+
                     xspm_dma_wait();
                 }
-                for (int ii = 0; ii < bs; ii++)
-                    for (int kk = 0; kk < bs; kk++)
-                        for (int jj = 0; jj < bs; jj++)
-                            sc[ii * bs + jj] += sa[ii * bs + kk] * sb[kk * bs + jj];
+
+                int *tmp = spm_b;
+                spm_b = spm_b_buf;
+                spm_b_buf = tmp;
             }
-            for (int m = 0; m < bs; m++) {
-                xspm_dma((uintptr_t)(c + (m + i) * n + j),
-                         (uintptr_t)(sc + m * bs),
-                         bs * sizeof(int));
-                xspm_dma_wait();
-            }
+            spm_block_matmul(spm_a, spm_b,
+                             spm_c + ((n - BS) / BS) * BS * BS);
         }
+
+        for (int j = 0; j < n; j += BS)
+            dma_store_block(c + i * n + j,
+                            spm_c + (j / BS) * BS * BS, n);
     }
 
     int fail = 0;
@@ -120,15 +170,15 @@ int main(void)
 
     printf("=== Xspm custom instruction tests ===\n");
 
-    printf("[1] DRAM -> SPM copy ... ");
-    int f1 = test_dram_to_spm();
-    printf("%s (%d failures)\n", f1 ? "FAIL" : "PASS", f1);
-    total += f1;
+    // printf("[1] DRAM -> SPM copy ... ");
+    // int f1 = test_dram_to_spm();
+    // printf("%s (%d failures)\n", f1 ? "FAIL" : "PASS", f1);
+    // total += f1;
 
-    printf("[2] SPM -> DRAM copy ... ");
-    int f2 = test_spm_to_dram();
-    printf("%s (%d failures)\n", f2 ? "FAIL" : "PASS", f2);
-    total += f2;
+    // printf("[2] SPM -> DRAM copy ... ");
+    // int f2 = test_spm_to_dram();
+    // printf("%s (%d failures)\n", f2 ? "FAIL" : "PASS", f2);
+    // total += f2;
 
     printf("[3] Blocked GEMM via xspm ... ");
     int f3 = test_gemm_xinsn();

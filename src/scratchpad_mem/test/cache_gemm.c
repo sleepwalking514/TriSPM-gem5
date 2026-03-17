@@ -1,71 +1,68 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "../libspm.h"
 
-void matmul(const int *a, const int *b, int *c, int n) {
-    for (int i = 0; i < n; i++) {
-        for (int k = 0; k < n; k++) {
-            for (int j = 0; j < n; j++) {
-                c[i * n + j] += a[i * n + k] * b[k * n + j];
-            }
-        }
-    }
-}
+#define BS 32
 
-void blocked_gemm(const int *a, const int *b, int *c, int n) {
-    int block_size = 32;
-    int *spm_a = (int *)malloc(block_size * block_size * sizeof(int));
-    int *spm_b = (int *)malloc(block_size * block_size * sizeof(int));
-    int *spm_c = (int *)malloc(block_size * block_size * sizeof(int));
-        
-    for (int i = 0; i < n; i += block_size) {
-        for (int j = 0; j < n; j += block_size) {
-            memset(spm_c, 0, block_size * block_size * sizeof(int));
-            for (int k = 0; k < n; k += block_size) {
-                
-                for (int m = 0; m < block_size; m++) {
-                    memcpy(spm_a + m * block_size, a + (m + i) * n + k, block_size * sizeof(int));
-                    memcpy(spm_b + m * block_size, b + (m + k) * n + j, block_size * sizeof(int));
+/*
+ * 6-loop tiled GEMM optimised for hardware cache hierarchy.
+ *
+ * Outer tiling (ii-kk-jj): working set of 3 BS*BS tiles ≈ 12KB fits in L1D.
+ *   - kk in middle: A(ii,kk) tile stays hot in L1 while jj sweeps,
+ *     matching the reuse pattern that caches reward automatically.
+ *
+ * Inner micro-kernel (i-k-j):
+ *   - a[i][k] hoisted into a register (scalar promotion) → 1 load per (i,k)
+ *   - b[k][j] swept sequentially → perfect cache-line utilisation
+ *   - c[i][j] swept sequentially → same cache lines reused across k
+ *
+ * No explicit data copying — the entire data-movement strategy relies on the
+ * cache keeping recently-touched lines warm, which is the whole point of a
+ * cache-based memory system.
+ */
+static void tiled_gemm(const int *restrict a, const int *restrict b,
+                        int *restrict c, int n)
+{
+    for (int ii = 0; ii < n; ii += BS) {
+        for (int kk = 0; kk < n; kk += BS) {
+            for (int jj = 0; jj < n; jj += BS) {
+                for (int i = ii; i < ii + BS; i++) {
+                    for (int k = kk; k < kk + BS; k++) {
+                        int a_ik = a[i * n + k];
+                        for (int j = jj; j < jj + BS; j++)
+                            c[i * n + j] += a_ik * b[k * n + j];
+                    }
                 }
-
-                matmul(spm_a, spm_b, spm_c, block_size);
-            }
-            for (int m = 0; m < block_size; m++) {
-                memcpy(c + (m + i) * n + j, spm_c + m * block_size, block_size * sizeof(int));
             }
         }
     }
 }
 
-int main(void) {
+int main(void)
+{
     printf("Init...\n");
 
-    int n = 256;
+    int n = 1024;
     int *a = (int *)malloc(n * n * sizeof(int));
     int *b = (int *)malloc(n * n * sizeof(int));
     int *c = (int *)malloc(n * n * sizeof(int));
-    
-    for (int i = 0; i < n * n; i++) {
-        a[i] = i;
-        b[i] = i;
-        c[i] = 0;
-    }
 
-    // 开始测量初始化阶段
     m5_reset_stats(0, 0);
     for (int i = 0; i < n * n; i++) {
-        a[i] = i;
-        b[i] = i;
+        a[i] = i + 1;
+        b[i] = i + 1;
         c[i] = 0;
     }
-    // 停止统计并清零，为下一个阶段重新计数
     m5_dump_stats(0, 0);
     m5_reset_stats(0, 0);
 
-    blocked_gemm(a, b, c, n);
+    tiled_gemm(a, b, c, n);
 
-    // 结束统计
     m5_dump_stats(0, 0);
 
+    free(a);
+    free(b);
+    free(c);
     return 0;
 }
