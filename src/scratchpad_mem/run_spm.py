@@ -108,70 +108,41 @@ class SPMSystem(System):
         self.cpu.mmu.dtb.walker.port = self.dptw_cache.cpu_side
 
         # =========================
-        # SPM + MMIO 总线（非一致性）
+        # spm_xbar: CPU dcache + DMA 共享的地址路由
+        #   1) cacheable (0-512MiB)    → L1D
+        #   2) SPM       (0x40000000+) → ScratchpadMemory
+        #   3) DMA MMIO  (0xF0000000)  → SpmDmaEngine PIO
+        #   4) uncached  (512MiB-1GiB) → Bridge → membus
         # =========================
-        self.spm_bus = NoncoherentXBar(width=64, frontend_latency=1, forward_latency=1, response_latency=1)
+        self.spm_xbar = NoncoherentXBar(
+            width=64, frontend_latency=1, forward_latency=1, response_latency=1
+        )
 
-        # SPM 实例
+        self.cpu.dcache_port = self.spm_xbar.cpu_side_ports
+
         self.spm = ScratchpadMemory(
             range=AddrRange(start=self._spm_start_addr, size=spm_size),
             latency=spm_latency,
             bandwidth=spm_bw
         )
-        self.spm.port = self.spm_bus.mem_side_ports
+        self.spm.port = self.spm_xbar.mem_side_ports
 
-        # =========================
-        # CPU D-side 路由：三条路
-        #   1) SPM + DMA MMIO -> spm_bus（绕过 cache）
-        #   2) DMA_BUF(uncached) -> membus（绕过 cache）
-        #   3) 其余 cacheable -> L1D
-        # =========================
-        self.cpu_d_splitter = NoncoherentXBar(width=64, frontend_latency=1, forward_latency=1, response_latency=1)
-        self.cpu.dcache_port = self.cpu_d_splitter.cpu_side_ports
-
-        # Bridge: SPM + DMA MMIO -> spm_bus
-        self.spm_bridge = Bridge(
-            ranges=[
-                AddrRange(start=self._spm_start_addr, size=self._spm_size_val),
-                AddrRange(start=self._dma_base_addr, size=self._dma_size),
-            ],
-            delay='1ns'
-        )
-        self.spm_bridge.mem_side_port = self.spm_bus.cpu_side_ports
-
-        # Bridge: DMA_BUF -> membus (uncached)
-        self.uc_dma_bridge = Bridge(
-            ranges=[
-                AddrRange(start=self._dma_buf_base, size=self._dma_buf_size),
-            ],
-            delay='1ns'
-        )
-        self.uc_dma_bridge.mem_side_port = self.membus.cpu_side_ports
-
-        # splitter 出口：按地址范围路由
-        self.cpu_d_splitter.mem_side_ports = [
-            self.spm_bridge.cpu_side_port,     # SPM + MMIO
-            self.uc_dma_bridge.cpu_side_port,  # DMA buffer (uncached)
-            self.l1d.cpu_side                  # cacheable normal DRAM
-        ]
-
-        # =========================
-        # SpmDmaEngine (replaces CopyEngine)
-        # =========================
         self.spm_dma = SpmDmaEngine(
             pio_addr=self._dma_base_addr,
             pio_size=0x20,
             pio_latency='1ns'
         )
+        self.spm_dma.pio = self.spm_xbar.mem_side_ports
+        self.spm_dma.dma = self.spm_xbar.cpu_side_ports
 
-        self.spm_dma.pio = self.spm_bus.mem_side_ports
+        self.uc_bridge = Bridge(
+            ranges=[AddrRange(start=self._dma_buf_base, size=self._dma_buf_size)],
+            delay='1ns'
+        )
+        self.uc_bridge.mem_side_port = self.membus.cpu_side_ports
+        self.spm_xbar.mem_side_ports = self.uc_bridge.cpu_side_port
 
-        self.dma_xbar = NoncoherentXBar(width=64, frontend_latency=1, forward_latency=1, response_latency=1)
-        self.spm_dma.dma = self.dma_xbar.cpu_side_ports
-        self.dma_xbar.mem_side_ports = [
-            self.spm_bus.cpu_side_ports,
-            self.membus.cpu_side_ports
-        ]
+        self.spm_xbar.mem_side_ports = self.l1d.cpu_side
 
         # =========================
         # DRAM Controller
