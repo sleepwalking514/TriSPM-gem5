@@ -51,7 +51,8 @@ class MMUCache(Cache):
 # SPMSystem
 # =========================
 class SPMSystem(System):
-    def __init__(self, binary, spm_size, spm_latency, spm_bw):
+    def __init__(self, binary, spm_size, spm_latency, spm_bw,
+                 spm_num_banks=4, spm_intlv=8):
         super().__init__()
 
         # 时钟/模式/内存范围
@@ -133,6 +134,8 @@ class SPMSystem(System):
             range=AddrRange(start=self._spm_start_addr, size=spm_size),
             latency=spm_latency,
             bandwidth=spm_bw,
+            num_banks=spm_num_banks,
+            bank_interleave_size=spm_intlv,
         )
         self.spm.port = self.spm_xbar.mem_side_ports
 
@@ -232,6 +235,13 @@ if __name__ == "__m5_main__":
     parser.add_argument(
         "--spm_bw", type=str, default="64GB/s", help="Bandwidth of SPM"
     )
+    parser.add_argument(
+        "--spm_num_banks", type=int, default=4, help="Number of SPM banks"
+    )
+    parser.add_argument(
+        "--spm_intlv", type=int, default=8,
+        help="Bank interleave granularity in bytes (power of 2)"
+    )
     args = parser.parse_args()
 
     root = Root(full_system=False)
@@ -241,6 +251,8 @@ if __name__ == "__m5_main__":
         spm_size=args.spm_size,
         spm_latency=args.spm_lat,
         spm_bw=args.spm_bw,
+        spm_num_banks=args.spm_num_banks,
+        spm_intlv=args.spm_intlv,
     )
 
     print("Instantiating...")

@@ -6,4 +6,5 @@ SimObject("SpmDmaEngine.py", sim_objects=["SpmDmaEngine"])
 Source("scratchpad_memory.cc")
 Source("spm_dma_engine.cc")
 
+DebugFlag("ScratchpadMem", "Scratchpad memory debug messages")
 DebugFlag("SpmDma", "SPM DMA engine debug messages")

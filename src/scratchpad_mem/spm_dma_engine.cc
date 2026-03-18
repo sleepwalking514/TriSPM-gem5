@@ -79,10 +79,12 @@ SpmDmaEngine::SpmDmaEngine(const Params &p)
       state(Idle),
       srcAddr(0), dstAddr(0), totalLen(0),
       buffer(nullptr),
+      transferStartTick(0),
       pendingStatusPkt(nullptr),
       beginReadEvent([this]{ beginRead(); }, name() + ".beginRead"),
       readDoneEvent([this]{ readDone(); }, name() + ".readDone"),
-      writeDoneEvent([this]{ writeDone(); }, name() + ".writeDone")
+      writeDoneEvent([this]{ writeDone(); }, name() + ".writeDone"),
+      dmaStats(*this)
 {
     panic_if(instance, "Only one SpmDmaEngine instance is supported");
     instance = this;
@@ -177,6 +179,7 @@ SpmDmaEngine::startCopy(Addr src, Addr dst, uint64_t len)
     totalLen = len;
     buffer   = new uint8_t[len];
     state    = Reading;
+    transferStartTick = curTick();
 
     DPRINTF(SpmDma, "startCopy: src=0x%x dst=0x%x len=%d "
             "(init_latency=%d ticks)\n", src, dst, len, initLatency);
@@ -212,6 +215,13 @@ SpmDmaEngine::writeDone()
 void
 SpmDmaEngine::transferComplete()
 {
+    dmaStats.transfers++;
+    dmaStats.bytesTransferred += totalLen;
+    dmaStats.busyTicks += curTick() - transferStartTick;
+
+    DPRINTF(SpmDma, "transferComplete: %d bytes, latency=%d ticks\n",
+            totalLen, curTick() - transferStartTick);
+
     delete[] buffer;
     buffer = nullptr;
     state  = Idle;
@@ -223,6 +233,45 @@ SpmDmaEngine::transferComplete()
         pendingStatusPkt = nullptr;
         DPRINTF(SpmDma, "Unblocked pending STATUS read\n");
     }
+
+    if (drainState() == DrainState::Draining) {
+        DPRINTF(SpmDma, "Drain complete\n");
+        signalDrainDone();
+    }
+}
+
+// ---------------- Drain ----------------
+
+DrainState
+SpmDmaEngine::drain()
+{
+    if (state != Idle) {
+        DPRINTF(SpmDma, "DMA busy (state=%d), waiting to drain\n", state);
+        return DrainState::Draining;
+    }
+    return DrainState::Drained;
+}
+
+// ---------------- Stats ----------------
+
+SpmDmaEngine::DmaStats::DmaStats(SpmDmaEngine &_engine)
+    : statistics::Group(&_engine),
+      ADD_STAT(transfers, statistics::units::Count::get(),
+               "Total DMA transfers completed"),
+      ADD_STAT(bytesTransferred, statistics::units::Byte::get(),
+               "Total bytes transferred by DMA"),
+      ADD_STAT(busyTicks, statistics::units::Tick::get(),
+               "Total ticks DMA engine was busy"),
+      ADD_STAT(avgLatency, statistics::units::Tick::get(),
+               "Average latency per DMA transfer")
+{
+}
+
+void
+SpmDmaEngine::DmaStats::regStats()
+{
+    statistics::Group::regStats();
+    avgLatency = busyTicks / transfers;
 }
 
 // ---------------- Free functions for ISA instructions ----------------

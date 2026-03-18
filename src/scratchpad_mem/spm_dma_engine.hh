@@ -8,6 +8,7 @@
 #include "params/SpmDmaEngine.hh"
 #include "sim/clocked_object.hh"
 #include "sim/eventq.hh"
+#include "sim/stats.hh"
 #include "sim/system.hh"
 
 namespace gem5
@@ -22,6 +23,7 @@ class SpmDmaEngine : public ClockedObject
 
     Port &getPort(const std::string &if_name, PortID idx) override;
     void init() override;
+    DrainState drain() override;
 
     void startCopy(Addr src, Addr dst, uint64_t len);
     bool isComplete() const { return state == Idle; }
@@ -64,6 +66,9 @@ class SpmDmaEngine : public ClockedObject
     uint64_t totalLen;
     uint8_t *buffer;
 
+    /** Tick at which the current transfer was initiated. */
+    Tick transferStartTick;
+
     PacketPtr pendingStatusPkt;
 
     EventFunctionWrapper beginReadEvent;
@@ -71,6 +76,17 @@ class SpmDmaEngine : public ClockedObject
     EventFunctionWrapper writeDoneEvent;
 
     static SpmDmaEngine *instance;
+
+    struct DmaStats : public statistics::Group
+    {
+        DmaStats(SpmDmaEngine &engine);
+        void regStats() override;
+
+        statistics::Scalar transfers;
+        statistics::Scalar bytesTransferred;
+        statistics::Scalar busyTicks;
+        statistics::Formula avgLatency;
+    } dmaStats;
 
     Tick handleRead(PacketPtr pkt);
     Tick handleWrite(PacketPtr pkt);
