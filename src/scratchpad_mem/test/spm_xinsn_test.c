@@ -170,15 +170,15 @@ int main(void)
 
     printf("=== Xspm custom instruction tests ===\n");
 
-    // printf("[1] DRAM -> SPM copy ... ");
-    // int f1 = test_dram_to_spm();
-    // printf("%s (%d failures)\n", f1 ? "FAIL" : "PASS", f1);
-    // total += f1;
+    printf("[1] DRAM -> SPM copy ... ");
+    int f1 = test_dram_to_spm();
+    printf("%s (%d failures)\n", f1 ? "FAIL" : "PASS", f1);
+    total += f1;
 
-    // printf("[2] SPM -> DRAM copy ... ");
-    // int f2 = test_spm_to_dram();
-    // printf("%s (%d failures)\n", f2 ? "FAIL" : "PASS", f2);
-    // total += f2;
+    printf("[2] SPM -> DRAM copy ... ");
+    int f2 = test_spm_to_dram();
+    printf("%s (%d failures)\n", f2 ? "FAIL" : "PASS", f2);
+    total += f2;
 
     printf("[3] Blocked GEMM via xspm ... ");
     int f3 = test_gemm_xinsn();
