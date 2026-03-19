@@ -118,18 +118,19 @@ class SPMSystem(System):
         self.cpu.mmu.dtb.walker.port = self.dptw_cache.cpu_side
 
         # =========================
-        # spm_xbar: CPU dcache + DMA 共享的地址路由
-        #   1) cacheable (0-512MiB)    → L1D
-        #   2) SPM       (0x40000000+) → ScratchpadMemory
-        #   3) DMA MMIO  (0xF0000000)  → SpmDmaEngine PIO
-        #   4) uncached  (512MiB-1GiB) → Bridge → membus
+        # CPU dcache → L1D (direct, zero extra latency)
         # =========================
-        self.spm_xbar = NoncoherentXBar(
-            width=64, frontend_latency=1, forward_latency=1, response_latency=1
-        )
+        self.cpu.dcache_port = self.l1d.cpu_side
 
-        self.cpu.dcache_port = self.spm_xbar.cpu_side_ports
-
+        # =========================
+        # SPM / DMA / uncached bridge — all on L2XBar mem_side
+        #
+        # L2XBar routes by address:
+        #   [0, 512MiB)                  → L2Cache  (cacheable)
+        #   [spm_start, +spm_size)       → SPM      (uncacheable)
+        #   [dma_buf_base, +512MiB)      → Bridge   (uncacheable → DRAM)
+        #   [0xF0000000, +0x40)          → DMA PIO  (uncacheable)
+        # =========================
         self.spm = ScratchpadMemory(
             range=AddrRange(start=self._spm_start_addr, size=spm_size),
             latency=spm_latency,
@@ -137,24 +138,24 @@ class SPMSystem(System):
             num_banks=spm_num_banks,
             bank_interleave_size=spm_intlv,
         )
-        self.spm.port = self.spm_xbar.mem_side_ports
+        self.spm.port = self.l2bus.mem_side_ports
 
         self.spm_dma = SpmDmaEngine(
-            pio_addr=self._dma_base_addr, pio_size=0x20, pio_latency="1ns"
+            pio_addr=self._dma_base_addr, pio_size=0x40, pio_latency="1ns"
         )
-        self.spm_dma.pio = self.spm_xbar.mem_side_ports
-        self.spm_dma.dma = self.spm_xbar.cpu_side_ports
+        self.spm_dma.pio = self.l2bus.mem_side_ports
+        self.spm_dma.dma = self.l2bus.cpu_side_ports
 
         self.uc_bridge = Bridge(
             ranges=[
                 AddrRange(start=self._dma_buf_base, size=self._dma_buf_size)
             ],
             delay="1ns",
+            req_size=64,
+            resp_size=64,
         )
         self.uc_bridge.mem_side_port = self.membus.cpu_side_ports
-        self.spm_xbar.mem_side_ports = self.uc_bridge.cpu_side_port
-
-        self.spm_xbar.mem_side_ports = self.l1d.cpu_side
+        self.l2bus.mem_side_ports = self.uc_bridge.cpu_side_port
 
         # =========================
         # DRAM Controller
@@ -180,29 +181,35 @@ class SPMSystem(System):
         self.cpu.createThreads()
 
     def map_spm(self):
-        """在 instantiate 后调用"""
-        # 映射 SPM
+        """在 instantiate 后调用。
+        SPM / DMA MMIO / DMA BUF 均标记为 uncacheable，
+        使 L1D 收到这些地址的请求时直接 forward 到 L2XBar，不分配 cache line。
+        """
         print(
-            f"Mapping SPM: 0x{self._spm_start_addr:x} size: {self._spm_size_val}"
+            f"Mapping SPM (uncacheable): "
+            f"0x{self._spm_start_addr:x} size: {self._spm_size_val}"
         )
         self.process.map(
-            self._spm_start_addr, self._spm_start_addr, self._spm_size_val
+            self._spm_start_addr, self._spm_start_addr,
+            self._spm_size_val, False
         )
 
-        # 映射 DMA MMIO
         print(
-            f"Mapping DMA MMIO: 0x{self._dma_base_addr:x} size: {self._dma_size}"
+            f"Mapping DMA MMIO (uncacheable): "
+            f"0x{self._dma_base_addr:x} size: {self._dma_size}"
         )
         self.process.map(
-            self._dma_base_addr, self._dma_base_addr, self._dma_size
+            self._dma_base_addr, self._dma_base_addr,
+            self._dma_size, False
         )
 
-        # 映射 DMA BUF（VA=PA）
         print(
-            f"Mapping DMA BUF: 0x{self._dma_buf_base:x} size: {self._dma_buf_size}"
+            f"Mapping DMA BUF (uncacheable): "
+            f"0x{self._dma_buf_base:x} size: {self._dma_buf_size}"
         )
         self.process.map(
-            self._dma_buf_base, self._dma_buf_base, self._dma_buf_size
+            self._dma_buf_base, self._dma_buf_base,
+            self._dma_buf_size, False
         )
 
     def _parse_size(self, size_str):
@@ -233,7 +240,7 @@ if __name__ == "__m5_main__":
         "--spm_lat", type=str, default="1ns", help="Latency of SPM"
     )
     parser.add_argument(
-        "--spm_bw", type=str, default="64GB/s", help="Bandwidth of SPM"
+        "--spm_bw", type=str, default="64GiB/s", help="Bandwidth of SPM"
     )
     parser.add_argument(
         "--spm_num_banks", type=int, default=4, help="Number of SPM banks"
@@ -241,6 +248,10 @@ if __name__ == "__m5_main__":
     parser.add_argument(
         "--spm_intlv", type=int, default=8,
         help="Bank interleave granularity in bytes (power of 2)"
+    )
+    parser.add_argument(
+        "--max-tick", type=int, default=0,
+        help="Stop simulation after this many ticks (0 = unlimited)"
     )
     args = parser.parse_args()
 
@@ -262,5 +273,9 @@ if __name__ == "__m5_main__":
     root.system.map_spm()
 
     print("Starting simulation...")
-    exit_event = m5.simulate()
+    if args.max_tick > 0:
+        print(f"  (max tick limit: {args.max_tick})")
+        exit_event = m5.simulate(args.max_tick)
+    else:
+        exit_event = m5.simulate()
     print(f"Exiting @ tick {m5.curTick()} because {exit_event.getCause()}")

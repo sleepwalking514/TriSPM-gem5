@@ -10,7 +10,7 @@ class ScratchpadMemory(AbstractMemory):
 
     latency = Param.Latency('1ns', 'Per-bank access latency')
     latency_var = Param.Latency('0ns', 'Access latency variance')
-    bandwidth = Param.MemoryBandwidth('64GB/s',
+    bandwidth = Param.MemoryBandwidth('64GiB/s',
         'Port bandwidth limit (0 = unlimited)')
 
     num_banks = Param.Unsigned(4, 'Number of SRAM banks')

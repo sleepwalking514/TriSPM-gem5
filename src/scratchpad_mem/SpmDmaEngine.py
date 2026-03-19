@@ -13,6 +13,6 @@ class SpmDmaEngine(ClockedObject):
     dma = RequestPort("DMA port for memory read/write")
 
     pio_addr = Param.Addr("Base address of PIO registers")
-    pio_size = Param.Addr(0x20, "PIO region size (4 regs x 8 bytes)")
+    pio_size = Param.Addr(0x40, "PIO region size (must cover >= 1 cache line)")
     pio_latency = Param.Latency('1ns', 'Latency for PIO register access')
     init_latency = Param.Latency('1ns', 'Startup latency before DMA begins')
