@@ -595,12 +595,15 @@ TLB::translate(const RequestPtr &req, ThreadContext *tc,
          * need to ignore the upper bits beyond 32 bits.
          */
         Addr vaddr = getValidAddr(req->getVaddr(), tc, mode);
-        Addr paddr;
 
-        if (!p->pTable->translate(vaddr, paddr))
+        const auto pte = p->pTable->lookup(vaddr);
+        if (!pte)
             return std::make_shared<GenericPageTableFault>(req->getVaddr());
 
-        req->setPaddr(paddr);
+        req->setPaddr(pte->paddr + p->pTable->pageOffset(vaddr));
+
+        if (pte->flags & EmulationPageTable::Uncacheable)
+            req->setFlags(Request::UNCACHEABLE | Request::STRICT_ORDER);
 
         return NoFault;
     }
