@@ -51,8 +51,8 @@ class MMUCache(Cache):
 # SPMSystem
 # =========================
 class SPMSystem(System):
-    def __init__(self, binary, spm_size, spm_latency, spm_bw,
-                 spm_num_banks=4, spm_intlv=8):
+    def __init__(self, binary, enable_spm, spm_size, spm_latency, spm_bw,
+                 spm_num_banks, spm_intlv):
         super().__init__()
 
         # 时钟/模式/内存范围
@@ -70,25 +70,28 @@ class SPMSystem(System):
         # System MemBus
         self.membus = SystemXBar()
 
-        # DMA MMIO
-        self._dma_base_addr = 0xF0000000
-        self._dma_size = 0x10000
+        if enable_spm:
+            # DMA MMIO
+            self._dma_base_addr = 0xF0000000
+            self._dma_size = 0x10000
 
-        # SPM 区域
-        self._spm_start_addr = 0x40000000
-        self._spm_size_val = self._parse_size(spm_size)
+            # SPM 区域
+            self._spm_start_addr = 0x40000000
+            self._spm_size_val = self._parse_size(spm_size)
 
-        # cache 只覆盖前 512MiB
-        self._cacheable_range = AddrRange("512MiB")
-        valid_cache_ranges = [self._cacheable_range]
+            # cache 只覆盖前 512MiB
+            valid_cache_ranges = [AddrRange("512MiB")]
 
-        # DMA buffer 覆盖后 512MiB 空间
-        self._dma_buf_size = self._parse_size("512MiB")
-        self._dma_buf_base = self._spm_start_addr - self._dma_buf_size
+            # DMA buffer 覆盖后 512MiB 空间
+            self._dma_buf_size = self._parse_size("512MiB")
+            self._dma_buf_base = self._spm_start_addr - self._dma_buf_size
 
-        assert (
-            self._spm_size_val <= self._dma_buf_size
-        ), f"SPM size ({self._spm_size_val}) must not exceed DMA buffer size ({self._dma_buf_size})"
+            assert (
+                self._spm_size_val <= self._dma_buf_size
+            ), f"SPM size ({self._spm_size_val}) must not exceed DMA buffer size ({self._dma_buf_size})"
+        else:
+            # cache 覆盖全 1GiB
+            valid_cache_ranges = [AddrRange("1GiB")]
 
         # =========================
         # Cache 层次结构
@@ -131,31 +134,32 @@ class SPMSystem(System):
         #   [dma_buf_base, +512MiB)      → Bridge   (uncacheable → DRAM)
         #   [0xF0000000, +0x40)          → DMA PIO  (uncacheable)
         # =========================
-        self.spm = ScratchpadMemory(
-            range=AddrRange(start=self._spm_start_addr, size=spm_size),
-            latency=spm_latency,
-            bandwidth=spm_bw,
-            num_banks=spm_num_banks,
-            bank_interleave_size=spm_intlv,
-        )
-        self.spm.port = self.l2bus.mem_side_ports
+        if enable_spm:
+            self.spm = ScratchpadMemory(
+                range=AddrRange(start=self._spm_start_addr, size=spm_size),
+                latency=spm_latency,
+                bandwidth=spm_bw,
+                num_banks=spm_num_banks,
+                bank_interleave_size=spm_intlv,
+            )
+            self.spm.port = self.l2bus.mem_side_ports
 
-        self.spm_dma = SpmDmaEngine(
-            pio_addr=self._dma_base_addr, pio_size=0x40, pio_latency="1ns"
-        )
-        self.spm_dma.pio = self.l2bus.mem_side_ports
-        self.spm_dma.dma = self.l2bus.cpu_side_ports
+            self.spm_dma = SpmDmaEngine(
+                pio_addr=self._dma_base_addr, pio_size=0x40, pio_latency="1ns"
+            )
+            self.spm_dma.pio = self.l2bus.mem_side_ports
+            self.spm_dma.dma = self.l2bus.cpu_side_ports
 
-        self.uc_bridge = Bridge(
-            ranges=[
-                AddrRange(start=self._dma_buf_base, size=self._dma_buf_size)
-            ],
-            delay="1ns",
-            req_size=64,
-            resp_size=64,
-        )
-        self.uc_bridge.mem_side_port = self.membus.cpu_side_ports
-        self.l2bus.mem_side_ports = self.uc_bridge.cpu_side_port
+            self.uc_bridge = Bridge(
+                ranges=[
+                    AddrRange(start=self._dma_buf_base, size=self._dma_buf_size)
+                ],
+                delay="1ns",
+                req_size=64,
+                resp_size=64,
+            )
+            self.uc_bridge.mem_side_port = self.membus.cpu_side_ports
+            self.l2bus.mem_side_ports = self.uc_bridge.cpu_side_port
 
         # =========================
         # DRAM Controller
@@ -171,11 +175,12 @@ class SPMSystem(System):
         # Workload
         # =========================
         self.process = Process(cmd=[binary])
-        self.process.env = [
-            f"SPM_SIZE_BYTES={self._parse_size(spm_size)}",
-            f"DMA_BUF_BASE=0x{self._dma_buf_base:x}",
-            f"DMA_BUF_SIZE={self._dma_buf_size}",
-        ]
+        if enable_spm:
+            self.process.env = [
+                f"SPM_SIZE_BYTES={self._parse_size(spm_size)}",
+                f"DMA_BUF_BASE=0x{self._dma_buf_base:x}",
+                f"DMA_BUF_SIZE={self._dma_buf_size}",
+            ]
         self.workload = SEWorkload.init_compatible(binary)
         self.cpu.workload = self.process
         self.cpu.createThreads()
@@ -234,7 +239,10 @@ if __name__ == "__m5_main__":
         "--binary", type=str, required=True, help="Path to binary"
     )
     parser.add_argument(
-        "--spm_size", type=str, default="64KiB", help="Size of SPM"
+        "--cache_baseline", action="store_true", help="Traditional cache architecture"
+    )
+    parser.add_argument(
+        "--spm_size", type=str, default="128KiB", help="Size of SPM"
     )
     parser.add_argument(
         "--spm_lat", type=str, default="1ns", help="Latency of SPM"
@@ -259,6 +267,7 @@ if __name__ == "__m5_main__":
 
     root.system = SPMSystem(
         binary=args.binary,
+        enable_spm=not args.cache_baseline,
         spm_size=args.spm_size,
         spm_latency=args.spm_lat,
         spm_bw=args.spm_bw,
@@ -269,8 +278,9 @@ if __name__ == "__m5_main__":
     print("Instantiating...")
     m5.instantiate()
 
-    print("Mapping spm regions...")
-    root.system.map_spm()
+    if not args.cache_baseline:
+        print("Mapping spm regions...")
+        root.system.map_spm()
 
     print("Starting simulation...")
     if args.max_tick > 0:

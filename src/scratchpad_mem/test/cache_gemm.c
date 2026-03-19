@@ -3,7 +3,7 @@
 #include <string.h>
 #include "../libspm.h"
 
-#define BS 32
+#define BS 16
 
 /*
  * 6-loop tiled GEMM optimised for hardware cache hierarchy.
@@ -43,7 +43,7 @@ int main(void)
 {
     printf("Init...\n");
 
-    int n = 1024;
+    int n = 32;
     int *a = (int *)malloc(n * n * sizeof(int));
     int *b = (int *)malloc(n * n * sizeof(int));
     int *c = (int *)malloc(n * n * sizeof(int));

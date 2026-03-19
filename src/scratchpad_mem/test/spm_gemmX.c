@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include "../libspm.h"
 
-#define BS 32
+#define BS 16
 
 /*
  * Row-by-row DMA for a BSxBS sub-block.
@@ -118,7 +118,7 @@ int main(void)
 {
     printf("Init...\n");
 
-    int n = 1024;
+    int n = 32;
     int *a = (int *)dma_buf_malloc(n * n * sizeof(int));
     int *b = (int *)dma_buf_malloc(n * n * sizeof(int));
     int *c = (int *)dma_buf_malloc(n * n * sizeof(int));
