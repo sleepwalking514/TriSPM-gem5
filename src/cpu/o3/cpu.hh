@@ -573,6 +573,8 @@ class CPU : public BaseCPU
         return iew.ldstQueue.getDataPort();
     }
 
+    Port &getPort(const std::string &if_name, PortID idx) override;
+
     struct CPUStats : public statistics::Group
     {
         CPUStats(CPU *cpu);

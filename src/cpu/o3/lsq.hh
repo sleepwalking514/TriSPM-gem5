@@ -148,6 +148,24 @@ class LSQ
         bool throttleReadResp(PacketPtr pkt);
     };
 
+    /**
+     * SpmPort — dedicated request port for tightly-coupled scratchpad.
+     * Much simpler than DcachePort: no snooping, no throttling.
+     */
+    class SpmPort : public RequestPort
+    {
+      protected:
+        LSQ *lsq;
+
+      public:
+        SpmPort(LSQ *_lsq, CPU *_cpu);
+
+      protected:
+        bool recvTimingResp(PacketPtr pkt) override;
+        void recvReqRetry() override;
+        bool isSnooping() const override { return false; }
+    };
+
     /** Memory operation metadata.
      * This class holds the information about a memory operation. It lives
      * from initiateAcc to resource deallocation at commit or squash.
@@ -920,6 +938,11 @@ class LSQ
     void cachePortBusy(bool is_load);
 
     RequestPort &getDataPort() { return dcachePort; }
+    RequestPort &getSpmPort() { return spmPort; }
+
+    bool isSpmAddr(Addr addr) const;
+    bool spmPortBlocked() const { return _spmPortBlocked; }
+    void spmPortBlocked(bool v) { _spmPortBlocked = v; }
 
     void sendRetryResp();
 
@@ -982,6 +1005,12 @@ class LSQ
 
     /** Data port. */
     DcachePort dcachePort;
+
+    /** SPM direct port + address range. */
+    SpmPort spmPort;
+    AddrRange spmAddrRange;
+    bool _spmPortBlocked;
+
 
     /** The LSQ units for individual threads. */
     std::vector<LSQUnit> thread;

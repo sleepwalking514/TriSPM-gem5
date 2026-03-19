@@ -286,6 +286,18 @@ LSQUnit::setDcachePort(RequestPort *dcache_port)
 }
 
 void
+LSQUnit::setSpmPort(RequestPort *spm_port)
+{
+    spmPort = spm_port;
+}
+
+bool
+LSQUnit::isSpmAddr(Addr addr) const
+{
+    return lsq->isSpmAddr(addr);
+}
+
+void
 LSQUnit::drainSanityCheck() const
 {
     for (int i = 0; i < loadQueue.capacity(); ++i)
@@ -1212,25 +1224,41 @@ LSQUnit::trySendPacket(bool isLoad, PacketPtr data_pkt)
 
     LSQRequest *request = dynamic_cast<LSQRequest*>(data_pkt->senderState);
 
-    if (!lsq->cacheBlocked() &&
-        lsq->cachePortAvailable(isLoad)) {
-        if (!dcachePort->sendTimingReq(data_pkt)) {
+    const bool isSpm = lsq->isSpmAddr(data_pkt->getAddr());
+    RequestPort *targetPort = (isSpm && spmPort) ? spmPort : dcachePort;
+
+    if (isSpm) {
+        if (lsq->spmPortBlocked()) {
+            ret = false;
+        } else if (!targetPort->sendTimingReq(data_pkt)) {
             ret = false;
             cache_got_blocked = true;
         }
     } else {
-        ret = false;
+        if (!lsq->cacheBlocked() &&
+            lsq->cachePortAvailable(isLoad)) {
+            if (!dcachePort->sendTimingReq(data_pkt)) {
+                ret = false;
+                cache_got_blocked = true;
+            }
+        } else {
+            ret = false;
+        }
     }
 
     if (ret) {
         if (!isLoad) {
             isStoreBlocked = false;
         }
-        lsq->cachePortBusy(isLoad);
+        if (!isSpm)
+            lsq->cachePortBusy(isLoad);
         request->packetSent();
     } else {
         if (cache_got_blocked) {
-            lsq->cacheBlocked(true);
+            if (isSpm)
+                lsq->spmPortBlocked(true);
+            else
+                lsq->cacheBlocked(true);
             ++stats.blockedByCache;
         }
         if (!isLoad) {
@@ -1240,9 +1268,10 @@ LSQUnit::trySendPacket(bool isLoad, PacketPtr data_pkt)
         request->packetNotSent();
     }
     DPRINTF(LSQUnit, "Memory request (pkt: %s) from inst [sn:%llu] was"
-            " %ssent (cache is blocked: %d, cache_got_blocked: %d)\n",
+            " %ssent%s (blocked: %d)\n",
             data_pkt->print(), request->instruction()->seqNum,
-            ret ? "": "not ", lsq->cacheBlocked(), cache_got_blocked);
+            ret ? "": "not ", isSpm ? " [SPM]" : "",
+            isSpm ? (int)lsq->spmPortBlocked() : (int)lsq->cacheBlocked());
     return ret;
 }
 

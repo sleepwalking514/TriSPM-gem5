@@ -1468,5 +1468,13 @@ CPU::htmSendAbortSignal(ThreadID tid, uint64_t htm_uid,
     }
 }
 
+Port &
+CPU::getPort(const std::string &if_name, PortID idx)
+{
+    if (if_name == "spm_port")
+        return iew.ldstQueue.getSpmPort();
+    return BaseCPU::getPort(if_name, idx);
+}
+
 } // namespace o3
 } // namespace gem5

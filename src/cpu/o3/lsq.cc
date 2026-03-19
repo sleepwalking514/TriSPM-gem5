@@ -122,6 +122,12 @@ LSQ::LSQ(CPU *cpu_ptr, IEW *iew_ptr, const BaseO3CPUParams &params)
       maxSQEntries(maxLSQAllocation(lsqPolicy, SQEntries, params.numThreads,
                   params.smtLSQThreshold)),
       dcachePort(this, cpu_ptr),
+      spmPort(this, cpu_ptr),
+      spmAddrRange(params.spmAddrSize > 0
+                   ? AddrRange(params.spmAddrStart,
+                               params.spmAddrStart + params.spmAddrSize)
+                   : AddrRange()),
+      _spmPortBlocked(false),
       numThreads(params.numThreads),
       recvRespThrottling(params.recvRespThrottling),
       recvRespMaxCachelines(params.recvRespMaxCachelines),
@@ -163,6 +169,7 @@ LSQ::LSQ(CPU *cpu_ptr, IEW *iew_ptr, const BaseO3CPUParams &params)
         thread.emplace_back(maxLQEntries, maxSQEntries);
         thread[tid].init(cpu, iew_ptr, params, this, tid);
         thread[tid].setDcachePort(&dcachePort);
+        thread[tid].setSpmPort(&spmPort);
     }
 }
 
@@ -852,7 +859,13 @@ LSQ::SingleDataRequest::finish(const Fault &fault, const RequestPtr &request,
     if (_inst->isSquashed()) {
         squashTranslation();
     } else {
-        _inst->strictlyOrdered(request->isStrictlyOrdered());
+        bool strict = request->isStrictlyOrdered();
+        if (strict && fault == NoFault &&
+                lsqUnit()->isSpmAddr(request->getPaddr())) {
+            strict = false;
+            request->clearFlags(Request::STRICT_ORDER);
+        }
+        _inst->strictlyOrdered(strict);
 
         flags.set(Flag::TranslationFinished);
         if (fault == NoFault) {
@@ -891,7 +904,14 @@ LSQ::SplitDataRequest::finish(const Fault &fault, const RequestPtr &req,
         if (_inst->isSquashed()) {
             squashTranslation();
         } else {
-            _inst->strictlyOrdered(_mainReq->isStrictlyOrdered());
+            bool strict = _mainReq->isStrictlyOrdered();
+            if (strict && lsqUnit()->isSpmAddr(_mainReq->getPaddr())) {
+                strict = false;
+                _mainReq->clearFlags(Request::STRICT_ORDER);
+                for (auto &r : _reqs)
+                    r->clearFlags(Request::STRICT_ORDER);
+            }
+            _inst->strictlyOrdered(strict);
             flags.set(Flag::TranslationFinished);
             _inst->translationCompleted(true);
 
@@ -1500,6 +1520,31 @@ void
 LSQ::DcachePort::recvReqRetry()
 {
     lsq->recvReqRetry();
+}
+
+// --- SpmPort implementation ---
+
+LSQ::SpmPort::SpmPort(LSQ *_lsq, CPU *_cpu)
+    : RequestPort(_lsq->name() + ".spm_port"), lsq(_lsq)
+{}
+
+bool
+LSQ::SpmPort::recvTimingResp(PacketPtr pkt)
+{
+    return lsq->recvTimingResp(pkt);
+}
+
+void
+LSQ::SpmPort::recvReqRetry()
+{
+    lsq->_spmPortBlocked = false;
+    lsq->recvReqRetry();
+}
+
+bool
+LSQ::isSpmAddr(Addr addr) const
+{
+    return spmAddrRange.valid() && spmAddrRange.contains(addr);
 }
 
 LSQ::UnsquashableDirectRequest::UnsquashableDirectRequest(

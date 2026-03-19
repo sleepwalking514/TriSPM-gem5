@@ -230,6 +230,8 @@ class LSQUnit
 
     /** Sets the pointer to the dcache port. */
     void setDcachePort(RequestPort *dcache_port);
+    void setSpmPort(RequestPort *spm_port);
+    bool isSpmAddr(Addr addr) const;
 
     /** Perform sanity checks after a drain. */
     void drainSanityCheck() const;
@@ -406,6 +408,9 @@ class LSQUnit
 
     /** Pointer to the dcache port.  Used only for sending. */
     RequestPort *dcachePort;
+
+    /** Pointer to the SPM direct port. nullptr when SPM is not configured. */
+    RequestPort *spmPort = nullptr;
 
     /** Writeback event, specifically for when stores forward data to loads. */
     class WritebackEvent : public Event

@@ -207,6 +207,10 @@ class BaseO3CPU(BaseCPU):
     )
     needsTSO = Param.Bool(False, "Enable TSO Memory model")
 
+    spm_port = RequestPort("SPM direct-access port (tightly-coupled)")
+    spmAddrStart = Param.Addr(0, "SPM start physical address (0 = disabled)")
+    spmAddrSize = Param.Addr(0, "SPM region size in bytes (0 = disabled)")
+
     recvRespThrottling = Param.Bool(
         False, "Enable load receive response throttling in the LSQ"
     )
