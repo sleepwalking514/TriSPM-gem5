@@ -6,7 +6,8 @@ class ScratchpadMemory(AbstractMemory):
     cxx_header = "scratchpad_mem/scratchpad_memory.hh"
     cxx_class = "gem5::memory::ScratchpadMemory"
 
-    port = ResponsePort("Response port for memory access")
+    port = ResponsePort("DMA / interconnect side port")
+    cpu_port = ResponsePort("CPU direct-access port (tightly-coupled)")
 
     latency = Param.Latency('1ns', 'Per-bank access latency')
     latency_var = Param.Latency('0ns', 'Access latency variance')

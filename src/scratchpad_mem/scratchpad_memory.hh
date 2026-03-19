@@ -16,35 +16,31 @@ namespace memory
 {
 
 /**
- * Multi-banked scratchpad memory with per-bank conflict modeling.
+ * Multi-banked scratchpad memory with two response ports:
+ *   port     — DMA / interconnect path (L2XBar)
+ *   cpu_port — CPU direct path (tightly-coupled, low latency)
  *
- * Address-to-bank mapping uses word-level interleaving:
- *   bank = ((addr - base) / interleave_size) % num_banks
- *
- * When two accesses hit the same bank within its latency window,
- * the later one observes additional latency (bank conflict).
- * Accesses to different banks proceed without penalty.
+ * Both ports share the same backing store and bank-conflict model.
  */
 class ScratchpadMemory : public AbstractMemory
 {
 
   private:
 
-    class DeferredPacket
-    {
-      public:
-        const Tick tick;
-        const PacketPtr pkt;
-        DeferredPacket(PacketPtr _pkt, Tick _tick) : tick(_tick), pkt(_pkt) {}
-    };
+    static constexpr int PORT_BUS = 0;
+    static constexpr int PORT_CPU = 1;
+    static constexpr int NUM_PORTS = 2;
 
     class MemoryPort : public ResponsePort
     {
       private:
         ScratchpadMemory& mem;
+        int id_;
 
       public:
-        MemoryPort(const std::string& _name, ScratchpadMemory& _memory);
+        MemoryPort(const std::string& _name, ScratchpadMemory& _memory,
+                   int id);
+        int id() const { return id_; }
 
       protected:
         Tick recvAtomic(PacketPtr pkt) override;
@@ -58,7 +54,22 @@ class ScratchpadMemory : public AbstractMemory
         AddrRangeList getAddrRanges() const override;
     };
 
+    class DeferredPacket
+    {
+      public:
+        const Tick tick;
+        const PacketPtr pkt;
+        const int portId;
+        DeferredPacket(PacketPtr _pkt, Tick _tick, int _portId)
+            : tick(_tick), pkt(_pkt), portId(_portId) {}
+    };
+
     MemoryPort port;
+    MemoryPort cpuPort;
+
+    MemoryPort& portById(int id) {
+        return (id == PORT_CPU) ? cpuPort : port;
+    }
 
     const Tick latency;
     const Tick latencyVar;
@@ -67,14 +78,13 @@ class ScratchpadMemory : public AbstractMemory
     const unsigned numBanks;
     const unsigned bankIntlvSize;
 
-    /** Tick at which each bank becomes free. */
     std::vector<Tick> bankBusyUntil;
 
     std::list<DeferredPacket> packetQueue;
 
     bool isBusy;
-    bool retryReq;
-    bool retryResp;
+    bool retryReq_[NUM_PORTS];
+    bool retryResp_[NUM_PORTS];
 
     mutable Random::RandomPtr rng = Random::genRandom();
 
@@ -85,8 +95,6 @@ class ScratchpadMemory : public AbstractMemory
     EventFunctionWrapper dequeueEvent;
 
     Tick getLatency() const;
-
-    /** Map a byte address to its bank index. */
     unsigned addrToBank(Addr addr) const;
 
     std::unique_ptr<Packet> pendingDelete;
@@ -128,8 +136,8 @@ class ScratchpadMemory : public AbstractMemory
     void recvFunctional(PacketPtr pkt);
     void recvMemBackdoorReq(const MemBackdoorReq &req,
             MemBackdoorPtr &backdoor);
-    bool recvTimingReq(PacketPtr pkt);
-    void recvRespRetry();
+    bool recvTimingReq(PacketPtr pkt, int portId);
+    void recvRespRetry(int portId);
 };
 
 } // namespace memory

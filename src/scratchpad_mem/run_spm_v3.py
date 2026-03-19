@@ -51,8 +51,16 @@ class MMUCache(Cache):
 # SPMSystem
 # =========================
 class SPMSystem(System):
-    def __init__(self, binary, enable_spm, spm_size, spm_latency, spm_bw,
-                 spm_num_banks, spm_intlv):
+    def __init__(
+        self,
+        binary,
+        enable_spm,
+        spm_size,
+        spm_latency,
+        spm_bw,
+        spm_num_banks,
+        spm_intlv,
+    ):
         super().__init__()
 
         # 时钟/模式/内存范围
@@ -152,7 +160,9 @@ class SPMSystem(System):
 
             self.uc_bridge = Bridge(
                 ranges=[
-                    AddrRange(start=self._dma_buf_base, size=self._dma_buf_size)
+                    AddrRange(
+                        start=self._dma_buf_base, size=self._dma_buf_size
+                    )
                 ],
                 delay="1ns",
                 req_size=64,
@@ -195,8 +205,10 @@ class SPMSystem(System):
             f"0x{self._spm_start_addr:x} size: {self._spm_size_val}"
         )
         self.process.map(
-            self._spm_start_addr, self._spm_start_addr,
-            self._spm_size_val, False
+            self._spm_start_addr,
+            self._spm_start_addr,
+            self._spm_size_val,
+            False,
         )
 
         print(
@@ -204,8 +216,7 @@ class SPMSystem(System):
             f"0x{self._dma_base_addr:x} size: {self._dma_size}"
         )
         self.process.map(
-            self._dma_base_addr, self._dma_base_addr,
-            self._dma_size, False
+            self._dma_base_addr, self._dma_base_addr, self._dma_size, False
         )
 
         print(
@@ -213,8 +224,7 @@ class SPMSystem(System):
             f"0x{self._dma_buf_base:x} size: {self._dma_buf_size}"
         )
         self.process.map(
-            self._dma_buf_base, self._dma_buf_base,
-            self._dma_buf_size, False
+            self._dma_buf_base, self._dma_buf_base, self._dma_buf_size, False
         )
 
     def _parse_size(self, size_str):
@@ -239,7 +249,9 @@ if __name__ == "__m5_main__":
         "--binary", type=str, required=True, help="Path to binary"
     )
     parser.add_argument(
-        "--cache_baseline", action="store_true", help="Traditional cache architecture"
+        "--cache_baseline",
+        action="store_true",
+        help="Traditional cache architecture",
     )
     parser.add_argument(
         "--spm_size", type=str, default="128KiB", help="Size of SPM"
@@ -254,12 +266,16 @@ if __name__ == "__m5_main__":
         "--spm_num_banks", type=int, default=4, help="Number of SPM banks"
     )
     parser.add_argument(
-        "--spm_intlv", type=int, default=8,
-        help="Bank interleave granularity in bytes (power of 2)"
+        "--spm_intlv",
+        type=int,
+        default=8,
+        help="Bank interleave granularity in bytes (power of 2)",
     )
     parser.add_argument(
-        "--max-tick", type=int, default=0,
-        help="Stop simulation after this many ticks (0 = unlimited)"
+        "--max-tick",
+        type=int,
+        default=0,
+        help="Stop simulation after this many ticks (0 = unlimited)",
     )
     args = parser.parse_args()
 

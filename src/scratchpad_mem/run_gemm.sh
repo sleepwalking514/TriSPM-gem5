@@ -26,25 +26,18 @@ riscv64-unknown-linux-gnu-gcc -O3 -static \
     -DN=${MAT_N} -DBS=${MAT_BS} \
     -o spm_gemmX ./spm_gemmX.c
 
-riscv64-unknown-linux-gnu-gcc -O3 -static -o spm_gemmX_v2 ./spm_gemmX_v2.c
-
 cd ..
 
 # ---------- 运行 ----------
 
-# # Cache baseline (关闭 SPM 系统)
-# echo "--- cache baseline ---"
-# gem5.opt run_spm.py --binary ./test/cache_gemm --cache_baseline
-# mv m5out/stats.txt "m5out/cache_gemm_wo_spm_${TAG}.txt"
+# Cache baseline (关闭 SPM 系统)
+echo "--- cache baseline ---"
+gem5.opt run_spm.py --binary ./test/cache_gemm --cache_baseline
+mv m5out/stats.txt "m5out/cache_gemm_wo_spm_${TAG}.txt"
 
-# # SPM + custom 指令
-# echo "--- spm gemmX ---"
-# gem5.opt run_spm.py --binary ./test/spm_gemmX
-# mv m5out/stats.txt "m5out/spm_gemmX_${TAG}.txt"
-
-# SPM v2 + custom 指令
+# SPM + custom 指令
 echo "--- spm gemmX ---"
-gem5.opt run_spm_v2.py --binary ./test/spm_gemmX_v2
-mv m5out/stats.txt "m5out/spm_gemmX_v22_${TAG}.txt"
+gem5.opt run_spm.py --binary ./test/spm_gemmX
+mv m5out/stats.txt "m5out/spm_gemmX_${TAG}.txt"
 
 echo "===== done ====="

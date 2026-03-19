@@ -15,7 +15,8 @@ namespace memory
 
 ScratchpadMemory::ScratchpadMemory(const ScratchpadMemoryParams &p)
     : AbstractMemory(p),
-      port(name() + ".port", *this),
+      port(name() + ".port", *this, PORT_BUS),
+      cpuPort(name() + ".cpu_port", *this, PORT_CPU),
       latency(p.latency),
       latencyVar(p.latency_var),
       bandwidth(p.bandwidth),
@@ -23,8 +24,8 @@ ScratchpadMemory::ScratchpadMemory(const ScratchpadMemoryParams &p)
       bankIntlvSize(p.bank_interleave_size),
       bankBusyUntil(p.num_banks, 0),
       isBusy(false),
-      retryReq(false),
-      retryResp(false),
+      retryReq_{false, false},
+      retryResp_{false, false},
       releaseEvent([this]{ release(); }, name()),
       dequeueEvent([this]{ dequeue(); }, name()),
       spmStats(*this)
@@ -40,9 +41,10 @@ ScratchpadMemory::init()
 {
     AbstractMemory::init();
 
-    if (port.isConnected()) {
+    if (port.isConnected())
         port.sendRangeChange();
-    }
+    if (cpuPort.isConnected())
+        cpuPort.sendRangeChange();
 
     DPRINTF(ScratchpadMem, "Initialized: %d banks, %d-byte interleave, "
             "%d tick base latency, size=%#x\n",
@@ -105,7 +107,7 @@ ScratchpadMemory::recvMemBackdoorReq(const MemBackdoorReq &req,
 }
 
 bool
-ScratchpadMemory::recvTimingReq(PacketPtr pkt)
+ScratchpadMemory::recvTimingReq(PacketPtr pkt, int portId)
 {
     panic_if(pkt->cacheResponding(),
              "Should not see packets where cache is responding");
@@ -114,18 +116,17 @@ ScratchpadMemory::recvTimingReq(PacketPtr pkt)
              "Should only see read and writes at memory controller, "
              "saw %s to %#llx\n", pkt->cmdString(), pkt->getAddr());
 
-    if (retryReq)
+    if (retryReq_[portId])
         return false;
 
     if (isBusy) {
-        retryReq = true;
+        retryReq_[portId] = true;
         return false;
     }
 
     Tick receive_delay = pkt->headerDelay + pkt->payloadDelay;
     pkt->headerDelay = pkt->payloadDelay = 0;
 
-    // Port-level bandwidth limiting
     Tick duration = pkt->getSize() * bandwidth;
     if (duration != 0) {
         schedule(releaseEvent, curTick() + duration);
@@ -179,12 +180,12 @@ ScratchpadMemory::recvTimingReq(PacketPtr pkt)
         spmStats.writeLatency += totalLatency;
     }
 
-    DPRINTF(ScratchpadMem, "%s addr=%#x size=%d nBanks=%d latency=%d%s\n",
-            isRead ? "Read" : "Write", addr, size,
+    DPRINTF(ScratchpadMem, "[port%d] %s addr=%#x size=%d nBanks=%d "
+            "latency=%d%s\n",
+            portId, isRead ? "Read" : "Write", addr, size,
             touchedBanks.size(), totalLatency,
             hadConflict ? " CONFLICT" : "");
 
-    // Perform the data access (AbstractMemory updates base stats)
     bool needsResponse = pkt->needsResponse();
     access(pkt);
 
@@ -193,19 +194,18 @@ ScratchpadMemory::recvTimingReq(PacketPtr pkt)
 
         Tick when_to_send = curTick() + receive_delay + totalLatency;
 
-        // Insertion sort by send time, preserving order for same address
         if (packetQueue.empty()) {
-            packetQueue.emplace_back(pkt, when_to_send);
+            packetQueue.emplace_back(pkt, when_to_send, portId);
         } else {
             auto i = packetQueue.end();
             --i;
             while (i != packetQueue.begin() && when_to_send < i->tick &&
                    !i->pkt->matchAddr(pkt))
                 --i;
-            packetQueue.emplace(++i, pkt, when_to_send);
+            packetQueue.emplace(++i, pkt, when_to_send, portId);
         }
 
-        if (!retryResp && !dequeueEvent.scheduled())
+        if (!retryResp_[portId] && !dequeueEvent.scheduled())
             schedule(dequeueEvent, packetQueue.back().tick);
     } else {
         pendingDelete.reset(pkt);
@@ -219,9 +219,11 @@ ScratchpadMemory::release()
 {
     assert(isBusy);
     isBusy = false;
-    if (retryReq) {
-        retryReq = false;
-        port.sendRetryReq();
+    for (int i = 0; i < NUM_PORTS; i++) {
+        if (retryReq_[i]) {
+            retryReq_[i] = false;
+            portById(i).sendRetryReq();
+        }
     }
 }
 
@@ -231,9 +233,11 @@ ScratchpadMemory::dequeue()
     assert(!packetQueue.empty());
     DeferredPacket deferred_pkt = packetQueue.front();
 
-    retryResp = !port.sendTimingResp(deferred_pkt.pkt);
+    MemoryPort &respPort = portById(deferred_pkt.portId);
+    bool sent = respPort.sendTimingResp(deferred_pkt.pkt);
+    retryResp_[deferred_pkt.portId] = !sent;
 
-    if (!retryResp) {
+    if (sent) {
         packetQueue.pop_front();
 
         if (!packetQueue.empty()) {
@@ -247,20 +251,21 @@ ScratchpadMemory::dequeue()
 }
 
 void
-ScratchpadMemory::recvRespRetry()
+ScratchpadMemory::recvRespRetry(int portId)
 {
-    assert(retryResp);
+    assert(retryResp_[portId]);
+    retryResp_[portId] = false;
     dequeue();
 }
 
 Port &
 ScratchpadMemory::getPort(const std::string &if_name, PortID idx)
 {
-    if (if_name != "port") {
-        return AbstractMemory::getPort(if_name, idx);
-    } else {
+    if (if_name == "port")
         return port;
-    }
+    else if (if_name == "cpu_port")
+        return cpuPort;
+    return AbstractMemory::getPort(if_name, idx);
 }
 
 DrainState
@@ -278,8 +283,8 @@ ScratchpadMemory::drain()
 // --- MemoryPort ---
 
 ScratchpadMemory::MemoryPort::MemoryPort(const std::string& _name,
-                                         ScratchpadMemory& _memory)
-    : ResponsePort(_name), mem(_memory)
+                                         ScratchpadMemory& _memory, int _id)
+    : ResponsePort(_name), mem(_memory), id_(_id)
 { }
 
 AddrRangeList
@@ -319,13 +324,13 @@ ScratchpadMemory::MemoryPort::recvMemBackdoorReq(const MemBackdoorReq &req,
 bool
 ScratchpadMemory::MemoryPort::recvTimingReq(PacketPtr pkt)
 {
-    return mem.recvTimingReq(pkt);
+    return mem.recvTimingReq(pkt, id_);
 }
 
 void
 ScratchpadMemory::MemoryPort::recvRespRetry()
 {
-    mem.recvRespRetry();
+    mem.recvRespRetry(id_);
 }
 
 // --- Stats ---
