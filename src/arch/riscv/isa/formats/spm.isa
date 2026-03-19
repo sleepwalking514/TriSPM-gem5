@@ -25,17 +25,23 @@ def format SpmDmaOp(code, *opt_flags) {{
 //
 // IsNonSpeculative: only issue this load when it reaches the ROB head,
 //   guaranteeing that the prior spm.dma has committed and the DMA has
-//   actually started before we read the STATUS register.
-// IsSerializeBefore: drain the pipeline first so all prior stores
-//   (which provide the DMA source data) have reached memory.
-// IsSerializeAfter: block subsequent instructions until this commits,
-//   ensuring DMA destination data is visible before any consumer loads.
+//   actually started before we read the STATUS register.  All prior
+//   instructions (compute between spm.dma and spm.dma.w) will have
+//   committed by that point, enabling DMA/compute overlap for double
+//   buffering without an expensive pipeline drain.
+//
+// Removed IsSerializeBefore / IsSerializeAfter:
+//   In compiler-controlled SPM the compiler guarantees data-dependency
+//   correctness.  IsNonSpeculative already ensures all prior instructions
+//   (including the spm.dma that started the transfer) have committed
+//   before this load executes.  Dropping the serialize flags avoids a
+//   full pipeline drain on every DMA wait, which is critical for
+//   effective DMA/compute overlap in double-buffered kernels.
 def format SpmDmaWaitOp(memacc_code,
         ea_code={{EA = 0xF0000018ULL;}},
         offset_code={{;}},
         mem_flags=[], inst_flags=[]) {{
-    inst_flags += ['IsNonSpeculative', 'IsSerializeBefore',
-                   'IsSerializeAfter']
+    inst_flags += ['IsNonSpeculative']
     (header_output, decoder_output, decode_block, exec_output) = \
         LoadStoreBase(name, Name, offset_code, ea_code, memacc_code,
         mem_flags, inst_flags, 'SpmDmaWait', exec_template_base='Load')

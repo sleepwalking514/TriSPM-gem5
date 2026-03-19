@@ -3,136 +3,181 @@
 #include <stdlib.h>
 #include "../libspm.h"
 
+/* Compile-time matrix / tile dimensions.
+ * Override at build time:  -DN=256 -DBS=32                          */
+#ifndef N
+#define N 32
+#endif
+
+#ifndef BS
 #define BS 16
+#endif
+
+#define NB          (N / BS)
+#define BLOCK_ELEMS (BS * BS)
+#define BLOCK_BYTES (BLOCK_ELEMS * sizeof(int))
+
+#if N < BS || N % BS != 0
+#error "N must be >= BS and divisible by BS"
+#endif
 
 /*
- * Row-by-row DMA for a BSxBS sub-block.
- * Single-issue DMA engine: must wait after each row.
- * Matrix in DRAM is row-major with leading dimension `ld`;
- * block in SPM is packed contiguous (stride = BS).
+ * ---------- Block-contiguous DRAM layout ----------
+ *
+ * An NxN matrix is stored as NB*NB contiguous BS*BS blocks.
+ * Block(bi, bj) occupies addresses  base + (bi*NB + bj) * BS*BS
+ * Inside each block elements are row-major: block[i*BS + j].
+ *
+ * This lets us DMA an entire BS*BS tile in ONE transfer (BS*BS*4 bytes)
+ * instead of BS separate row-by-row transfers.
  */
-static void dma_load_block(int *spm, const int *dram, int ld)
+static inline const int *blk_a(const int *base, int bi, int bk)
 {
-    for (int r = 0; r < BS; r++) {
-        xspm_dma((uintptr_t)(spm  + r * BS),
-                 (uintptr_t)(dram + r * ld),
-                 BS * sizeof(int));
-        xspm_dma_wait();
-    }
+    return base + (bi * NB + bk) * BLOCK_ELEMS;
+}
+static inline const int *blk_b(const int *base, int bk, int bj)
+{
+    return base + (bk * NB + bj) * BLOCK_ELEMS;
+}
+static inline int *blk_c(int *base, int bi, int bj)
+{
+    return base + (bi * NB + bj) * BLOCK_ELEMS;
 }
 
-static void dma_store_block(int *dram, const int *spm, int ld)
+/* ---------- DMA helpers (one full block per transfer) ---------- */
+
+static inline void dma_load(int *spm_dst, const int *dram_src)
 {
-    for (int r = 0; r < BS; r++) {
-        xspm_dma((uintptr_t)(dram + r * ld),
-                 (uintptr_t)(spm  + r * BS),
-                 BS * sizeof(int));
-        xspm_dma_wait();
-    }
+    xspm_dma((uintptr_t)spm_dst, (uintptr_t)dram_src, BLOCK_BYTES);
+    xspm_dma_wait();
 }
 
-/*
- * BSxBS block multiply in SPM: C += A * B.
- * ikj order with scalar promotion of a[i][k].
- */
-static void spm_block_matmul(const int *a, const int *b, int *c)
+static inline void dma_store(int *dram_dst, const int *spm_src)
 {
-    for (int i = 0; i < BS; i++) {
+    xspm_dma((uintptr_t)dram_dst, (uintptr_t)spm_src, BLOCK_BYTES);
+    xspm_dma_wait();
+}
+
+/* ---------- BS*BS micro-kernel: C += A * B  (ikj, scalar promotion) --- */
+
+static void block_matmul(const int *a, const int *b, int *c)
+{
+    for (int i = 0; i < BS; i++)
         for (int k = 0; k < BS; k++) {
             int aik = a[i * BS + k];
             for (int j = 0; j < BS; j++)
                 c[i * BS + j] += aik * b[k * BS + j];
         }
-    }
 }
 
 /*
- * Tiled GEMM on SPM.
+ * ---------- Tiled GEMM with double-buffered B ----------
  *
- * Loop order: i -> k -> j
- *   - A(i,k) loaded once per (i,k), reused across all j
- *     => 8x fewer A DMA transfers compared to i->j->k
- *   - C row-panel (all j-blocks for current i) stays in SPM
- *     => C is never DMA-loaded, only stored once per i-strip
+ * Loop order:  bi -> bk -> bj
+ *   - A(bi,bk) loaded once per (bi,bk), reused across all bj
+ *   - C row-panel (all bj for current bi) stays in SPM, stored once per bi
+ *   - B tiles are double-buffered: DMA for next B overlaps with compute
  *
- * DMA budget (N=256, BS=32, nb=8):
- *   A loads:  nb^2 blocks = 64,  each 32 row DMAs =>  2048  (was 16384)
- *   B loads:  nb^3 blocks = 512, each 32 row DMAs => 16384  (unchanged)
- *   C stores: nb^2 blocks = 64,  each 32 row DMAs =>  2048  (unchanged)
- *   Total: 20480 row DMAs  (was 34816, -41%)
+ * SPM footprint:
+ *   spm_a  : 1  block  = BS*BS*4
+ *   spm_b0 : 1  block  = BS*BS*4
+ *   spm_b1 : 1  block  = BS*BS*4   (double-buffer)
+ *   spm_c  : NB blocks = NB*BS*BS*4
+ *   Total  : (3 + NB) * BS*BS*4
  *
- * SPM footprint: 1*A + 1*B + nb*C = 4 + 4 + 32 = 40 KB
+ * DMA budget (per bi strip):
+ *   A loads  :  NB           blocks  (one per bk)
+ *   B loads  :  NB * NB      blocks  (NB per bk)
+ *   C stores :  NB           blocks
+ *   Total    :  NB*(NB+2)    full-block DMAs
+ *
+ * With N=256 BS=32 (NB=8):  SPM = 44 KB,  DMA = 640 transfers of 4 KB
  */
-void blocked_gemm(const int *a, const int *b, int *c, int n)
+void blocked_gemm(const int *a, const int *b, int *c)
 {
-    int nb = n / BS;
+    int *spm_a  = (int *)spm_malloc(BLOCK_BYTES);
+    int *spm_b0 = (int *)spm_malloc(BLOCK_BYTES);
+    int *spm_b1 = (int *)spm_malloc(BLOCK_BYTES);
+    int *spm_c  = (int *)spm_malloc(NB * BLOCK_BYTES);
 
-    int *spm_a = (int *)spm_malloc(BS * BS * sizeof(int));
-    int *spm_b = (int *)spm_malloc(BS * BS * sizeof(int));
-    int *spm_b_buf = (int *)spm_malloc(BS * BS * sizeof(int));
-    int *spm_c = (int *)spm_malloc(nb * BS * BS * sizeof(int));
+    for (int bi = 0; bi < NB; bi++) {
 
-    for (int i = 0; i < n; i += BS) {
-        spm_memset(spm_c, 0, nb * BS * BS * sizeof(int));
+        spm_memset(spm_c, 0, NB * BLOCK_BYTES);
 
-        for (int k = 0; k < n; k += BS) {
-            dma_load_block(spm_a, a + i * n + k, n);
-            // for (int j = 0; j < n; j += BS) {
-            //     dma_load_block(spm_b, b + k * n + j, n);
-            //     spm_block_matmul(spm_a, spm_b,
-            //                     spm_c + (j / BS) * BS * BS);
-            // }
+        for (int bk = 0; bk < NB; bk++) {
+            dma_load(spm_a, blk_a(a, bi, bk));
+            dma_load(spm_b0, blk_b(b, bk, 0));
 
-            dma_load_block(spm_b, b + k * n, n);
-            for (int j = 0; j < n - BS; j += BS) {
-                for (int ii = 0; ii < BS; ii++) {
-                    xspm_dma((uintptr_t)(spm_b_buf + ii * BS),
-                             (uintptr_t)(b + k * n + j + BS + ii * n),
-                             BS * sizeof(int));
+            int *cur = spm_b0, *nxt = spm_b1;
 
-                    for (int kk = 0; kk < BS; kk++) {
-                        int aik = spm_a[ii * BS + kk];
-                        for (int jj = 0; jj < BS; jj++) {
-                            spm_c[(j / BS) * BS * BS + ii * BS + jj] += aik * spm_b[kk * BS + jj];
-                        }
-                    }
+            for (int bj = 0; bj < NB - 1; bj++) {
+                /* async: prefetch next B while computing on current B */
+                xspm_dma((uintptr_t)nxt,
+                         (uintptr_t)blk_b(b, bk, bj + 1),
+                         BLOCK_BYTES);
 
-                    xspm_dma_wait();
-                }
+                block_matmul(spm_a, cur,
+                             spm_c + bj * BLOCK_ELEMS);
 
-                int *tmp = spm_b;
-                spm_b = spm_b_buf;
-                spm_b_buf = tmp;
+                xspm_dma_wait();
+
+                int *tmp = cur; cur = nxt; nxt = tmp;
             }
-            spm_block_matmul(spm_a, spm_b,
-                             spm_c + ((n - BS) / BS) * BS * BS);
+
+            /* last B block — no further prefetch needed */
+            block_matmul(spm_a, cur,
+                         spm_c + (NB - 1) * BLOCK_ELEMS);
         }
 
-        for (int j = 0; j < n; j += BS)
-            dma_store_block(c + i * n + j,
-                            spm_c + (j / BS) * BS * BS, n);
+        for (int bj = 0; bj < NB; bj++)
+            dma_store(blk_c(c, bi, bj),
+                      spm_c + bj * BLOCK_ELEMS);
     }
+}
+
+/* ---------- helpers ---------- */
+
+/*
+ * Compiled at O1 to avoid gem5 crash: the O3 auto-vectoriser generates
+ * RVV micro-ops (VPinVdMicroInst) that trigger a segfault inside gem5's
+ * O3 pipeline when targeting uncacheable DMA-buffer memory.  Since this
+ * is only init code (not measured), the lower optimisation level is fine.
+ */
+__attribute__((optimize("O1")))
+static void init_block_matrix(int *m)
+{
+    for (int bi = 0; bi < NB; bi++)
+        for (int bj = 0; bj < NB; bj++)
+            for (int i = 0; i < BS; i++)
+                for (int j = 0; j < BS; j++)
+                    m[(bi * NB + bj) * BLOCK_ELEMS + i * BS + j] =
+                        (bi * BS + i) * N + (bj * BS + j) + 1;
+}
+
+__attribute__((optimize("O1")))
+static void zero_matrix(int *m, int count)
+{
+    for (int i = 0; i < count; i++)
+        m[i] = 0;
 }
 
 int main(void)
 {
-    printf("Init...\n");
+    printf("GEMM  N=%d  BS=%d  NB=%d\n", N, BS, NB);
 
-    int n = 32;
-    int *a = (int *)dma_buf_malloc(n * n * sizeof(int));
-    int *b = (int *)dma_buf_malloc(n * n * sizeof(int));
-    int *c = (int *)dma_buf_malloc(n * n * sizeof(int));
+    int *a = (int *)dma_buf_malloc(N * N * sizeof(int));
+    int *b = (int *)dma_buf_malloc(N * N * sizeof(int));
+    int *c = (int *)dma_buf_malloc(N * N * sizeof(int));
+
+    init_block_matrix(a);
+    init_block_matrix(b);
+    zero_matrix(c, N * N);
 
     m5_reset_stats(0, 0);
-    for (int i = 0; i < n * n; i++) {
-        a[i] = i + 1;
-        b[i] = i + 1;
-        c[i] = 0;
-    }
     m5_dump_stats(0, 0);
     m5_reset_stats(0, 0);
 
-    blocked_gemm(a, b, c, n);
+    blocked_gemm(a, b, c);
 
     m5_dump_stats(0, 0);
 

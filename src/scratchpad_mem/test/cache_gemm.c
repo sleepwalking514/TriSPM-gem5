@@ -3,7 +3,13 @@
 #include <string.h>
 #include "../libspm.h"
 
+#ifndef N
+#define N 32
+#endif
+
+#ifndef BS
 #define BS 16
+#endif
 
 /*
  * 6-loop tiled GEMM optimised for hardware cache hierarchy.
@@ -41,19 +47,20 @@ static void tiled_gemm(const int *restrict a, const int *restrict b,
 
 int main(void)
 {
-    printf("Init...\n");
+    printf("Cache GEMM  N=%d  BS=%d\n", N, BS);
 
-    int n = 32;
+    int n = N;
     int *a = (int *)malloc(n * n * sizeof(int));
     int *b = (int *)malloc(n * n * sizeof(int));
     int *c = (int *)malloc(n * n * sizeof(int));
 
-    m5_reset_stats(0, 0);
     for (int i = 0; i < n * n; i++) {
         a[i] = i + 1;
         b[i] = i + 1;
         c[i] = 0;
     }
+
+    m5_reset_stats(0, 0);
     m5_dump_stats(0, 0);
     m5_reset_stats(0, 0);
 
