@@ -227,7 +227,7 @@ if __name__ == "__m5_main__":
         "--binary", type=str, required=True, help="Path to binary"
     )
     parser.add_argument(
-        "--spm_size", type=str, default="128KiB", help="Size of SPM"
+        "--spm_size", type=str, default="256KiB", help="Size of SPM"
     )
     parser.add_argument(
         "--spm_lat", type=str, default="1ns", help="Latency of SPM"

@@ -12,7 +12,7 @@ class L1Cache(Cache):
     tag_latency = 2
     data_latency = 2
     response_latency = 2
-    mshrs = 4
+    mshrs = 12
     tgts_per_mshr = 8
 
 
@@ -28,9 +28,9 @@ class L1DCache(L1Cache):
 class L2Cache(Cache):
     size = "512KiB"
     assoc = 16
-    tag_latency = 20
-    data_latency = 20
-    response_latency = 20
+    tag_latency = 10
+    data_latency = 10
+    response_latency = 5
     mshrs = 20
     tgts_per_mshr = 12
     prefetcher = StridePrefetcher(degree=8, latency=1)
@@ -257,13 +257,13 @@ if __name__ == "__m5_main__":
         "--binary", type=str, required=True, help="Path to binary"
     )
     parser.add_argument(
-        "--spm_size", type=str, default="64KiB", help="Size of SPM"
+        "--spm_size", type=str, default="256KiB", help="Size of SPM"
     )
     parser.add_argument(
         "--spm_lat", type=str, default="1ns", help="Latency of SPM"
     )
     parser.add_argument(
-        "--spm_bw", type=str, default="100GB/s", help="Bandwidth of SPM"
+        "--spm_bw", type=str, default="64GB/s", help="Bandwidth of SPM"
     )
     args = parser.parse_args()
 

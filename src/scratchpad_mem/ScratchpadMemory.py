@@ -14,6 +14,6 @@ class ScratchpadMemory(AbstractMemory):
     bandwidth = Param.MemoryBandwidth('64GiB/s',
         'Port bandwidth limit (0 = unlimited)')
 
-    num_banks = Param.Unsigned(4, 'Number of SRAM banks')
-    bank_interleave_size = Param.Unsigned(8,
+    num_banks = Param.Unsigned(16, 'Number of SRAM banks')
+    bank_interleave_size = Param.Unsigned(4,
         'Bank interleave granularity in bytes (must be power of 2)')

@@ -169,9 +169,9 @@ class SPMSystem(System):
         """Post-instantiate: mark SPM / DMA-MMIO / DMA-BUF uncacheable.
 
         SPM is uncacheable so the TLB sets UNCACHEABLE|STRICT_ORDER.
-        The LSQ override (Phase 2) clears strictlyOrdered for SPM
-        addresses and routes them to spm_port, so the O3 pipeline
-        does NOT serialise SPM accesses despite the uncacheable flag.
+        The LSQ override clears strictlyOrdered for SPM addresses
+        and routes them to spm_port, so the O3 pipeline does NOT
+        serialise SPM accesses despite the uncacheable flag.
         DMA MMIO and DMA buffer remain strictly ordered (correct).
         """
         print(f"Mapping SPM (uncacheable): "
@@ -214,7 +214,7 @@ if __name__ == "__m5_main__":
     parser.add_argument("--binary", type=str, required=True)
     parser.add_argument("--cache_baseline", action="store_true",
                         help="Pure cache architecture (no SPM)")
-    parser.add_argument("--spm_size", type=str, default="128KiB")
+    parser.add_argument("--spm_size", type=str, default="256KiB")
     parser.add_argument("--spm_lat", type=str, default="1ns")
     parser.add_argument("--spm_bw", type=str, default="64GiB/s")
     parser.add_argument("--spm_num_banks", type=int, default=16)

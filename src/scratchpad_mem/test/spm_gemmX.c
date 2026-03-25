@@ -93,7 +93,7 @@ static void block_matmul(const int *a, const int *b, int *c)
  *
  * With N=256 BS=32 (NB=8):  SPM = 44 KB,  DMA = 640 transfers of 4 KB
  */
-void blocked_gemm(const int *a, const int *b, int *c)
+void blocked_gemm(const int *restrict a, const int *restrict b, int *restrict c)
 {
     int *spm_a  = (int *)spm_malloc(BLOCK_BYTES);
     int *spm_b0 = (int *)spm_malloc(BLOCK_BYTES);

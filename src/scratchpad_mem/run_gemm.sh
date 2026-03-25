@@ -30,12 +30,27 @@ cd ..
 
 # ---------- 运行 ----------
 
-# Cache baseline (关闭 SPM 系统)
-echo "--- cache baseline ---"
-gem5.opt run_spm.py --binary ./test/cache_gemm --cache_baseline
-mv m5out/stats.txt "m5out/cache_gemm_wo_spm_${TAG}.txt"
+# # Cache baseline (关闭 SPM 系统)
+# echo "--- cache baseline ---"
+# gem5.opt run_spm.py --binary ./test/cache_gemm --cache_baseline
+# mv m5out/stats.txt "m5out/cache_gemm_wo_spm_${TAG}.txt"
 
-# SPM + custom 指令
+# SPM + custom 指令 v1
+echo "--- spm gemmX ---"
+gem5.opt run_spm_v1.py --binary ./test/spm_gemmX
+mv m5out/stats.txt "m5out/spm_v1_gemmX_${TAG}.txt"
+
+# SPM + custom 指令 v2
+echo "--- spm gemmX ---"
+gem5.opt run_spm_v2.py --binary ./test/spm_gemmX
+mv m5out/stats.txt "m5out/spm_v2_gemmX_${TAG}.txt"
+
+# SPM + custom 指令 v3
+echo "--- spm gemmX ---"
+gem5.opt run_spm_v3.py --binary ./test/spm_gemmX
+mv m5out/stats.txt "m5out/spm_v3_gemmX_${TAG}.txt"
+
+# SPM + custom 指令 v4
 echo "--- spm gemmX ---"
 gem5.opt run_spm.py --binary ./test/spm_gemmX
 mv m5out/stats.txt "m5out/spm_gemmX_${TAG}.txt"
