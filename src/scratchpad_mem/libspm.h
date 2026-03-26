@@ -103,7 +103,7 @@ static inline uint32_t dma_read32(uint32_t off)
 
 // Simple linear allocator
 // Leave descriptor and completion
-static unsigned long _spm_current_offset = 0x400;
+static unsigned long _spm_current_offset = 0x0;
 
 static size_t get_spm_size() {
     // 获取环境变量字符串
@@ -157,7 +157,7 @@ static inline void* spm_memset(void* s, int c, size_t n) {
 
 // Reset allocator
 static inline void spm_free_all() {
-    _spm_current_offset = 0x400;
+    _spm_current_offset = 0x0;
 }
 
 // -------------------- DMA API ------------------------------------------------
