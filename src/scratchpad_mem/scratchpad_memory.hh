@@ -1,6 +1,7 @@
 #ifndef __SCRATCHPAD_MEM_SCRATCHPAD_MEMORY_HH__
 #define __SCRATCHPAD_MEM_SCRATCHPAD_MEMORY_HH__
 
+#include <array>
 #include <list>
 #include <vector>
 
@@ -16,11 +17,15 @@ namespace memory
 {
 
 /**
- * Multi-banked scratchpad memory with two response ports:
+ * Multi-banked scratchpad memory (dual-port SRAM) with two response ports:
  *   port     — DMA / interconnect path (L2XBar)
  *   cpu_port — CPU direct path (tightly-coupled, low latency)
  *
- * Both ports share the same backing store and bank-conflict model.
+ * Both ports share the same backing store.  Each SRAM bank is modeled
+ * as dual-ported: the CPU port and bus/DMA port can access the same
+ * bank concurrently without conflict.  A bank conflict is only raised
+ * when the same port issues back-to-back accesses to a bank that has
+ * not yet finished its previous access on that port.
  */
 class ScratchpadMemory : public AbstractMemory
 {
@@ -78,18 +83,19 @@ class ScratchpadMemory : public AbstractMemory
     const unsigned numBanks;
     const unsigned bankIntlvSize;
 
-    std::vector<Tick> bankBusyUntil;
+    std::vector<std::array<Tick, NUM_PORTS>> bankBusyUntil;
 
     std::list<DeferredPacket> packetQueue;
 
-    bool isBusy;
+    bool isBusy_[NUM_PORTS];
     bool retryReq_[NUM_PORTS];
     bool retryResp_[NUM_PORTS];
 
     mutable Random::RandomPtr rng = Random::genRandom();
 
-    void release();
-    EventFunctionWrapper releaseEvent;
+    void release(int portId);
+    EventFunctionWrapper busReleaseEvent;
+    EventFunctionWrapper cpuReleaseEvent;
 
     void dequeue();
     EventFunctionWrapper dequeueEvent;
