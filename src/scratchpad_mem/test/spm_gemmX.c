@@ -44,20 +44,6 @@ static inline int *blk_c(int *base, int bi, int bj)
     return base + (bi * NB + bj) * BLOCK_ELEMS;
 }
 
-/* ---------- DMA helpers (one full block per transfer) ---------- */
-
-static inline void dma_load(int *spm_dst, const int *dram_src)
-{
-    xspm_dma((uintptr_t)spm_dst, (uintptr_t)dram_src, BLOCK_BYTES);
-    xspm_dma_wait();
-}
-
-static inline void dma_store(int *dram_dst, const int *spm_src)
-{
-    xspm_dma((uintptr_t)dram_dst, (uintptr_t)spm_src, BLOCK_BYTES);
-    xspm_dma_wait();
-}
-
 /* ---------- BS*BS micro-kernel: C += A * B  (ikj, scalar promotion) --- */
 
 static void block_matmul(const int *a, const int *b, int *c)
@@ -71,31 +57,49 @@ static void block_matmul(const int *a, const int *b, int *c)
 }
 
 /*
- * ---------- Tiled GEMM with double-buffered B ----------
+ * ---------- Tiled GEMM with double-buffered A and B ----------
+ *
+ * Exploits the 4-entry DMA descriptor queue for three optimizations
+ * over the previous single-transfer design:
+ *
+ *   1) Priming: A[bi,0] and B[0,0] are loaded concurrently
+ *      (2 queue entries, 1 wait) instead of two sequential loads.
+ *
+ *   2) bk transition: at the last bj of each bk, the next A tile
+ *      and B[bk+1,0] are prefetched concurrently (2 queue entries)
+ *      while the final block_matmul of the current bk executes.
+ *      This eliminates the synchronous A load that previously
+ *      stalled the pipeline at every bk boundary.
+ *
+ *   3) C store-back: tiles are flushed in batches of 4 (filling
+ *      the full descriptor queue) instead of one-at-a-time.
+ *
+ * Within the bj loop, B tiles are still double-buffered: DMA for
+ * the next B overlaps with the current block_matmul (1 queue entry).
  *
  * Loop order:  bi -> bk -> bj
  *   - A(bi,bk) loaded once per (bi,bk), reused across all bj
- *   - C row-panel (all bj for current bi) stays in SPM, stored once per bi
- *   - B tiles are double-buffered: DMA for next B overlaps with compute
+ *   - C row-panel stays in SPM, flushed once per bi
+ *   - B tiles double-buffered across bj
+ *   - A tiles double-buffered across bk
  *
  * SPM footprint:
- *   spm_a  : 1  block  = BS*BS*4
- *   spm_b0 : 1  block  = BS*BS*4
- *   spm_b1 : 1  block  = BS*BS*4   (double-buffer)
- *   spm_c  : NB blocks = NB*BS*BS*4
- *   Total  : (3 + NB) * BS*BS*4
+ *   spm_a0, spm_a1 : 2  blocks               (double-buffer A)
+ *   spm_b0, spm_b1 : 2  blocks               (double-buffer B)
+ *   spm_c          : NB blocks
+ *   Total          : (4 + NB) * BS*BS*4
  *
- * DMA budget (per bi strip):
- *   A loads  :  NB           blocks  (one per bk)
- *   B loads  :  NB * NB      blocks  (NB per bk)
- *   C stores :  NB           blocks
- *   Total    :  NB*(NB+2)    full-block DMAs
+ * Pipeline stall points per bi strip (vs old design):
+ *   Old:   2*NB sync loads + NB sync stores = 3*NB stalls
+ *   New:   1 prime wait + ceil(NB/4) store waits ≈ 3
  *
- * With N=256 BS=32 (NB=8):  SPM = 44 KB,  DMA = 640 transfers of 4 KB
+ * With N=256 BS=32 (NB=8):  SPM = 48 KB,  stalls: 3 (was 24)
  */
-void blocked_gemm(const int *restrict a, const int *restrict b, int *restrict c)
+void blocked_gemm(const int *restrict a, const int *restrict b,
+                  int *restrict c)
 {
-    int *spm_a  = (int *)spm_malloc(BLOCK_BYTES);
+    int *spm_a0 = (int *)spm_malloc(BLOCK_BYTES);
+    int *spm_a1 = (int *)spm_malloc(BLOCK_BYTES);
     int *spm_b0 = (int *)spm_malloc(BLOCK_BYTES);
     int *spm_b1 = (int *)spm_malloc(BLOCK_BYTES);
     int *spm_c  = (int *)spm_malloc(NB * BLOCK_BYTES);
@@ -104,34 +108,69 @@ void blocked_gemm(const int *restrict a, const int *restrict b, int *restrict c)
 
         spm_memset(spm_c, 0, NB * BLOCK_BYTES);
 
+        /* ---- Prime: load A[bi,0] and B[0,0] concurrently ---- */
+        xspm_dma((uintptr_t)spm_a0,
+                 (uintptr_t)blk_a(a, bi, 0), BLOCK_BYTES);
+        xspm_dma((uintptr_t)spm_b0,
+                 (uintptr_t)blk_b(b, 0, 0),  BLOCK_BYTES);
+        xspm_dma_wait();
+
+        int *cur_a = spm_a0, *nxt_a = spm_a1;
+        int *next_bk_b = spm_b0;
+
         for (int bk = 0; bk < NB; bk++) {
-            dma_load(spm_a, blk_a(a, bi, bk));
-            dma_load(spm_b0, blk_b(b, bk, 0));
+            int *cur_b = next_bk_b;
+            int *nxt_b = (cur_b == spm_b0) ? spm_b1 : spm_b0;
 
-            int *cur = spm_b0, *nxt = spm_b1;
+            for (int bj = 0; bj < NB; bj++) {
+                int n_prefetch = 0;
 
-            for (int bj = 0; bj < NB - 1; bj++) {
-                /* async: prefetch next B while computing on current B */
-                xspm_dma((uintptr_t)nxt,
-                         (uintptr_t)blk_b(b, bk, bj + 1),
-                         BLOCK_BYTES);
+                if (bj < NB - 1) {
+                    /* Prefetch next B tile (1 queue entry) */
+                    xspm_dma((uintptr_t)nxt_b,
+                             (uintptr_t)blk_b(b, bk, bj + 1),
+                             BLOCK_BYTES);
+                    n_prefetch = 1;
+                } else if (bk < NB - 1) {
+                    /* Last bj of this bk: prefetch next A and
+                     * first B of next bk (2 queue entries).
+                     * Both overlap with the final matmul below. */
+                    xspm_dma((uintptr_t)nxt_a,
+                             (uintptr_t)blk_a(a, bi, bk + 1),
+                             BLOCK_BYTES);
+                    xspm_dma((uintptr_t)nxt_b,
+                             (uintptr_t)blk_b(b, bk + 1, 0),
+                             BLOCK_BYTES);
+                    n_prefetch = 2;
+                    next_bk_b = nxt_b;
+                }
 
-                block_matmul(spm_a, cur,
+                /* Compute overlaps with in-flight DMA */
+                block_matmul(cur_a, cur_b,
                              spm_c + bj * BLOCK_ELEMS);
 
-                xspm_dma_wait();
+                if (n_prefetch > 0)
+                    xspm_dma_wait();
 
-                int *tmp = cur; cur = nxt; nxt = tmp;
+                /* Rotate B buffers */
+                int *tmp = cur_b; cur_b = nxt_b; nxt_b = tmp;
             }
 
-            /* last B block — no further prefetch needed */
-            block_matmul(spm_a, cur,
-                         spm_c + (NB - 1) * BLOCK_ELEMS);
+            /* Rotate A buffers for next bk */
+            if (bk < NB - 1) {
+                int *tmp = cur_a; cur_a = nxt_a; nxt_a = tmp;
+            }
         }
 
-        for (int bj = 0; bj < NB; bj++)
-            dma_store(blk_c(c, bi, bj),
-                      spm_c + bj * BLOCK_ELEMS);
+        /* ---- Store C row-panel: batches of 4 (full queue width) ---- */
+        for (int bj = 0; bj < NB; bj += 4) {
+            int batch = (NB - bj < 4) ? (NB - bj) : 4;
+            for (int k = 0; k < batch; k++)
+                xspm_dma((uintptr_t)blk_c(c, bi, bj + k),
+                         (uintptr_t)(spm_c + (bj + k) * BLOCK_ELEMS),
+                         BLOCK_BYTES);
+            xspm_dma_wait();
+        }
     }
 }
 
