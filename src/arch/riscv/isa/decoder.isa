@@ -6495,7 +6495,7 @@ decode QUADRANT default Unknown::unknown() {
             //   rs1 = DRAM source address
             //   rs2 = byte count
             0x0: SpmDmaOp::spm_dma({{
-                spmDmaStartCopy(Rs1, Rd, Rs2);
+                spmDmaStartCopy(xc->tcBase(), Rs1, Rd, Rs2);
                 Rd = Rd;
             }});
             // spm.dma.w -- wait for DMA completion

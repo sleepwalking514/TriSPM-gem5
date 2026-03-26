@@ -1,6 +1,7 @@
 #include "scratchpad_mem/spm_dma_engine.hh"
 
 #include "base/trace.hh"
+#include "cpu/thread_context.hh"
 #include "debug/SpmDma.hh"
 #include "mem/packet_access.hh"
 #include "sim/system.hh"
@@ -8,9 +9,18 @@
 namespace gem5
 {
 
-SpmDmaEngine *SpmDmaEngine::instance = nullptr;
+// ---- Per-System registry (replaces singleton) ----
 
-// ---------------- PioPort ----------------
+std::unordered_map<System*, SpmDmaEngine*> SpmDmaEngine::registry;
+
+SpmDmaEngine *
+SpmDmaEngine::lookup(System *sys)
+{
+    auto it = registry.find(sys);
+    return (it != registry.end()) ? it->second : nullptr;
+}
+
+// ---- PioPort ----
 
 SpmDmaEngine::PioPort::PioPort(const std::string &name,
                                 SpmDmaEngine *owner)
@@ -39,7 +49,8 @@ SpmDmaEngine::PioPort::recvTimingReq(PacketPtr pkt)
 {
     Addr offset = pkt->getAddr() - engine.pioAddr;
 
-    if (pkt->isRead() && offset == REG_STATUS && engine.state != Idle) {
+    // Block STATUS reads until all transfers (including queued) complete.
+    if (pkt->isRead() && offset == REG_STATUS && !engine.isComplete()) {
         panic_if(engine.pendingStatusPkt,
                  "SpmDmaEngine: only one pending STATUS read supported");
         pkt->makeResponse();
@@ -65,7 +76,7 @@ SpmDmaEngine::PioPort::getAddrRanges() const
     return { AddrRange(engine.pioAddr, engine.pioAddr + engine.pioSize) };
 }
 
-// ---------------- SpmDmaEngine ----------------
+// ---- SpmDmaEngine ----
 
 SpmDmaEngine::SpmDmaEngine(const Params &p)
     : ClockedObject(p),
@@ -75,10 +86,12 @@ SpmDmaEngine::SpmDmaEngine(const Params &p)
       pioAddr(p.pio_addr),
       pioSize(p.pio_size),
       pioDelay(p.pio_latency),
-      initLatency(p.init_latency),
+      descLatency(p.desc_latency),
+      maxDescriptors(p.max_descriptors),
       state(Idle),
-      srcAddr(0), dstAddr(0), totalLen(0),
+      curSrc(0), curDst(0), curLen(0),
       buffer(nullptr),
+      stagedSrc(0), stagedDst(0),
       transferStartTick(0),
       pendingStatusPkt(nullptr),
       beginReadEvent([this]{ beginRead(); }, name() + ".beginRead"),
@@ -86,14 +99,17 @@ SpmDmaEngine::SpmDmaEngine(const Params &p)
       writeDoneEvent([this]{ writeDone(); }, name() + ".writeDone"),
       dmaStats(*this)
 {
-    panic_if(instance, "Only one SpmDmaEngine instance is supported");
-    instance = this;
+    panic_if(maxDescriptors == 0, "max_descriptors must be > 0");
+    auto [it, inserted] = registry.emplace(system, this);
+    panic_if(!inserted,
+             "SpmDmaEngine: a DMA engine is already registered "
+             "for this System (multi-core requires per-CPU keying)");
 }
 
 SpmDmaEngine::~SpmDmaEngine()
 {
     delete[] buffer;
-    instance = nullptr;
+    registry.erase(system);
 }
 
 void
@@ -114,7 +130,7 @@ SpmDmaEngine::getPort(const std::string &if_name, PortID idx)
     return ClockedObject::getPort(if_name, idx);
 }
 
-// ---------------- PIO register handlers ----------------
+// ---- PIO register handlers ----
 
 Tick
 SpmDmaEngine::handleRead(PacketPtr pkt)
@@ -123,10 +139,10 @@ SpmDmaEngine::handleRead(PacketPtr pkt)
     uint64_t val = 0;
 
     switch (offset) {
-      case REG_SRC:    val = srcAddr;  break;
-      case REG_DST:    val = dstAddr;  break;
-      case REG_LEN:    val = totalLen; break;
-      case REG_STATUS: val = (state == Idle) ? 0 : 1; break;
+      case REG_SRC:    val = stagedSrc;      break;
+      case REG_DST:    val = stagedDst;      break;
+      case REG_LEN:    val = curLen;          break;
+      case REG_STATUS: val = pendingCount();  break;
       default:
         warn("SpmDmaEngine: read from unknown offset 0x%x\n", offset);
         break;
@@ -147,13 +163,14 @@ SpmDmaEngine::handleWrite(PacketPtr pkt)
 
     switch (offset) {
       case REG_SRC:
-        srcAddr = val;
+        stagedSrc = val;
         break;
       case REG_DST:
-        dstAddr = val;
+        stagedDst = val;
         break;
       case REG_LEN:
-        startCopy(srcAddr, dstAddr, val);
+        if (!startCopy(stagedSrc, stagedDst, val))
+            warn("SpmDmaEngine: descriptor queue full, transfer dropped\n");
         break;
       default:
         warn("SpmDmaEngine: write to unknown offset 0x%x\n", offset);
@@ -163,34 +180,60 @@ SpmDmaEngine::handleWrite(PacketPtr pkt)
     return pioDelay;
 }
 
-// ---------------- DMA logic ----------------
+// ---- Descriptor queue + DMA logic ----
 
-void
+bool
 SpmDmaEngine::startCopy(Addr src, Addr dst, uint64_t len)
 {
-    panic_if(state != Idle,
-             "SpmDmaEngine::startCopy called while busy (state=%d)", state);
-
     if (len == 0)
-        return;
+        return true;
 
-    srcAddr  = src;
-    dstAddr  = dst;
-    totalLen = len;
-    buffer   = new uint8_t[len];
-    state    = Reading;
+    if (descQueue.size() >= maxDescriptors) {
+        dmaStats.queueFullStalls++;
+        DPRINTF(SpmDma, "Queue full (%d/%d), rejecting src=0x%x dst=0x%x "
+                "len=%d\n", descQueue.size(), maxDescriptors, src, dst, len);
+        return false;
+    }
+
+    descQueue.push_back({src, dst, len});
+
+    DPRINTF(SpmDma, "Enqueued: src=0x%x dst=0x%x len=%d "
+            "(queue depth: %d/%d)\n",
+            src, dst, len, descQueue.size(), maxDescriptors);
+
+    if (state == Idle)
+        startNextTransfer();
+
+    return true;
+}
+
+void
+SpmDmaEngine::startNextTransfer()
+{
+    assert(state == Idle);
+    assert(!descQueue.empty());
+
+    Descriptor desc = descQueue.front();
+    descQueue.pop_front();
+
+    curSrc = desc.src;
+    curDst = desc.dst;
+    curLen = desc.len;
+    buffer = new uint8_t[curLen];
+    state  = Reading;
     transferStartTick = curTick();
 
-    DPRINTF(SpmDma, "startCopy: src=0x%x dst=0x%x len=%d "
-            "(init_latency=%d ticks)\n", src, dst, len, initLatency);
+    DPRINTF(SpmDma, "Starting transfer: src=0x%x dst=0x%x len=%d "
+            "(desc_latency=%d ticks)\n",
+            curSrc, curDst, curLen, descLatency);
 
-    schedule(beginReadEvent, curTick() + initLatency);
+    schedule(beginReadEvent, curTick() + descLatency);
 }
 
 void
 SpmDmaEngine::beginRead()
 {
-    dmaPort.dmaAction(MemCmd::ReadReq, srcAddr, totalLen,
+    dmaPort.dmaAction(MemCmd::ReadReq, curSrc, curLen,
                       &readDoneEvent, buffer, 0);
 }
 
@@ -198,10 +241,10 @@ void
 SpmDmaEngine::readDone()
 {
     DPRINTF(SpmDma, "readDone: writing %d bytes to dst=0x%x\n",
-            totalLen, dstAddr);
+            curLen, curDst);
 
     state = Writing;
-    dmaPort.dmaAction(MemCmd::WriteReq, dstAddr, totalLen,
+    dmaPort.dmaAction(MemCmd::WriteReq, curDst, curLen,
                       &writeDoneEvent, buffer, 0);
 }
 
@@ -216,19 +259,27 @@ void
 SpmDmaEngine::transferComplete()
 {
     dmaStats.transfers++;
-    dmaStats.bytesTransferred += totalLen;
+    dmaStats.bytesTransferred += curLen;
     dmaStats.busyTicks += curTick() - transferStartTick;
 
-    DPRINTF(SpmDma, "transferComplete: %d bytes, latency=%d ticks\n",
-            totalLen, curTick() - transferStartTick);
+    DPRINTF(SpmDma, "Transfer complete: %d bytes, latency=%d ticks "
+            "(remaining in queue: %d)\n",
+            curLen, curTick() - transferStartTick,
+            (unsigned)descQueue.size());
 
     delete[] buffer;
     buffer = nullptr;
     state  = Idle;
 
+    // Start next queued transfer if any.
+    if (!descQueue.empty()) {
+        startNextTransfer();
+        return;
+    }
+
+    // All transfers done — unblock any pending STATUS read.
     if (pendingStatusPkt) {
-        uint64_t status = 0;
-        pendingStatusPkt->setLE<uint64_t>(status);
+        pendingStatusPkt->setLE<uint64_t>(0);
         pioPort.schedTimingResp(pendingStatusPkt, curTick() + pioDelay);
         pendingStatusPkt = nullptr;
         DPRINTF(SpmDma, "Unblocked pending STATUS read\n");
@@ -240,19 +291,20 @@ SpmDmaEngine::transferComplete()
     }
 }
 
-// ---------------- Drain ----------------
+// ---- Drain ----
 
 DrainState
 SpmDmaEngine::drain()
 {
-    if (state != Idle) {
-        DPRINTF(SpmDma, "DMA busy (state=%d), waiting to drain\n", state);
+    if (!isComplete()) {
+        DPRINTF(SpmDma, "DMA busy (state=%d, queue=%d), waiting to drain\n",
+                state, (unsigned)descQueue.size());
         return DrainState::Draining;
     }
     return DrainState::Drained;
 }
 
-// ---------------- Stats ----------------
+// ---- Stats ----
 
 SpmDmaEngine::DmaStats::DmaStats(SpmDmaEngine &_engine)
     : statistics::Group(&_engine),
@@ -263,7 +315,9 @@ SpmDmaEngine::DmaStats::DmaStats(SpmDmaEngine &_engine)
       ADD_STAT(busyTicks, statistics::units::Tick::get(),
                "Total ticks DMA engine was busy"),
       ADD_STAT(avgLatency, statistics::units::Tick::get(),
-               "Average latency per DMA transfer")
+               "Average latency per DMA transfer"),
+      ADD_STAT(queueFullStalls, statistics::units::Count::get(),
+               "Enqueue attempts rejected due to full descriptor queue")
 {
 }
 
@@ -274,22 +328,33 @@ SpmDmaEngine::DmaStats::regStats()
     avgLatency = busyTicks / transfers;
 }
 
-// ---------------- Free functions for ISA instructions ----------------
+// ---- Free functions for ISA instructions ----
 
-void
-spmDmaStartCopy(Addr src, Addr dst, uint64_t len)
+bool
+spmDmaStartCopy(ThreadContext *tc, Addr src, Addr dst, uint64_t len)
 {
-    auto *eng = SpmDmaEngine::getInstance();
-    panic_if(!eng, "spmDmaStartCopy: no SpmDmaEngine instance");
-    eng->startCopy(src, dst, len);
+    auto *eng = SpmDmaEngine::lookup(tc->getSystemPtr());
+    panic_if(!eng, "spmDmaStartCopy: no SpmDmaEngine registered "
+             "for this System");
+    return eng->startCopy(src, dst, len);
 }
 
 bool
-spmDmaIsComplete()
+spmDmaIsComplete(ThreadContext *tc)
 {
-    auto *eng = SpmDmaEngine::getInstance();
-    panic_if(!eng, "spmDmaIsComplete: no SpmDmaEngine instance");
+    auto *eng = SpmDmaEngine::lookup(tc->getSystemPtr());
+    panic_if(!eng, "spmDmaIsComplete: no SpmDmaEngine registered "
+             "for this System");
     return eng->isComplete();
+}
+
+bool
+spmDmaQueueFull(ThreadContext *tc)
+{
+    auto *eng = SpmDmaEngine::lookup(tc->getSystemPtr());
+    panic_if(!eng, "spmDmaQueueFull: no SpmDmaEngine registered "
+             "for this System");
+    return eng->queueFull();
 }
 
 } // namespace gem5

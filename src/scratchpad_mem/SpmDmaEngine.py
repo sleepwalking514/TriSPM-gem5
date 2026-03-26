@@ -15,4 +15,7 @@ class SpmDmaEngine(ClockedObject):
     pio_addr = Param.Addr("Base address of PIO registers")
     pio_size = Param.Addr(0x40, "PIO region size (must cover >= 1 cache line)")
     pio_latency = Param.Latency('1ns', 'Latency for PIO register access')
-    init_latency = Param.Latency('1ns', 'Latency to decode a descriptor and initiate bus access')
+    desc_latency = Param.Latency('1ns',
+        'Per-descriptor decode/setup latency before DMA begins')
+    max_descriptors = Param.Unsigned(4,
+        'Maximum number of queued DMA descriptors')

@@ -2,6 +2,8 @@
 #define __SCRATCHPAD_MEM_SPM_DMA_ENGINE_HH__
 
 #include <cstdint>
+#include <deque>
+#include <unordered_map>
 
 #include "dev/dma_device.hh"
 #include "mem/tport.hh"
@@ -14,6 +16,20 @@
 namespace gem5
 {
 
+/**
+ * DMA engine for scratchpad memory with a multi-entry descriptor queue.
+ *
+ * Supports two programming interfaces:
+ *   1) MMIO: write SRC, DST, then LEN (writing LEN enqueues a transfer)
+ *   2) Custom ISA: spm.dma enqueues, spm.dma.w waits for all completion
+ *
+ * The descriptor queue allows multiple transfers to be queued (default 4),
+ * enabling the compiler to overlap DMA load/store with computation
+ * (e.g., double-buffered tiling without pipeline stalls between submit).
+ *
+ * Per-System registry replaces the previous singleton pattern, making
+ * the design extensible to multi-core configurations.
+ */
 class SpmDmaEngine : public ClockedObject
 {
   public:
@@ -25,12 +41,39 @@ class SpmDmaEngine : public ClockedObject
     void init() override;
     DrainState drain() override;
 
-    void startCopy(Addr src, Addr dst, uint64_t len);
-    bool isComplete() const { return state == Idle; }
+    /**
+     * Enqueue a DMA transfer.  Returns true if successfully queued,
+     * false if the descriptor queue is full (caller should retry).
+     */
+    bool startCopy(Addr src, Addr dst, uint64_t len);
 
-    static SpmDmaEngine *getInstance() { return instance; }
+    /** True when all transfers have completed and the queue is empty. */
+    bool isComplete() const { return state == Idle && descQueue.empty(); }
+
+    /** True when the descriptor queue has no free entries. */
+    bool queueFull() const {
+        return descQueue.size() >= maxDescriptors;
+    }
+
+    /** Number of in-flight + queued transfers (0 = idle). */
+    unsigned pendingCount() const {
+        return descQueue.size() + (state != Idle ? 1 : 0);
+    }
+
+    /**
+     * Look up the DMA engine registered for the given System.
+     * Returns nullptr if none is registered.
+     */
+    static SpmDmaEngine *lookup(System *sys);
 
   private:
+
+    struct Descriptor {
+        Addr src;
+        Addr dst;
+        uint64_t len;
+    };
+
     static constexpr Addr REG_SRC    = 0x00;
     static constexpr Addr REG_DST    = 0x08;
     static constexpr Addr REG_LEN    = 0x10;
@@ -58,13 +101,22 @@ class SpmDmaEngine : public ClockedObject
     Addr pioAddr;
     Addr pioSize;
     Tick pioDelay;
-    Tick initLatency;
+    Tick descLatency;
 
+    // ---- Descriptor queue ----
+    std::deque<Descriptor> descQueue;
+    unsigned maxDescriptors;
+
+    // ---- Current transfer state ----
     State state;
-    Addr srcAddr;
-    Addr dstAddr;
-    uint64_t totalLen;
+    Addr curSrc;
+    Addr curDst;
+    uint64_t curLen;
     uint8_t *buffer;
+
+    // Staged MMIO register values (written via SRC/DST before LEN enqueues)
+    Addr stagedSrc;
+    Addr stagedDst;
 
     /** Tick at which the current transfer was initiated. */
     Tick transferStartTick;
@@ -75,7 +127,8 @@ class SpmDmaEngine : public ClockedObject
     EventFunctionWrapper readDoneEvent;
     EventFunctionWrapper writeDoneEvent;
 
-    static SpmDmaEngine *instance;
+    // Per-System registry (replaces singleton)
+    static std::unordered_map<System*, SpmDmaEngine*> registry;
 
     struct DmaStats : public statistics::Group
     {
@@ -86,11 +139,13 @@ class SpmDmaEngine : public ClockedObject
         statistics::Scalar bytesTransferred;
         statistics::Scalar busyTicks;
         statistics::Formula avgLatency;
+        statistics::Scalar queueFullStalls;
     } dmaStats;
 
     Tick handleRead(PacketPtr pkt);
     Tick handleWrite(PacketPtr pkt);
 
+    void startNextTransfer();
     void beginRead();
     void readDone();
     void writeDone();

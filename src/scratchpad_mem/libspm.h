@@ -29,9 +29,9 @@ extern "C" {
 
 
 // -------------------- SpmDmaEngine register offsets --------------------------
-// Simple 4-register interface (no PCI, no descriptors).
-// Write SRC, DST, then LEN (writing LEN triggers the DMA).
-// Read STATUS to check completion (0 = idle, 1 = busy).
+// 4-register MMIO interface with descriptor queue (default depth: 4).
+// Write SRC, DST, then LEN (writing LEN enqueues a DMA transfer).
+// Read STATUS to check completion (0 = all idle, >0 = pending+active count).
 #define DMA_REG_SRC          0x00
 #define DMA_REG_DST          0x08
 #define DMA_REG_LEN          0x10
@@ -102,7 +102,6 @@ static inline uint32_t dma_read32(uint32_t off)
 // -------------------- SPM SPI -----------------
 
 // Simple linear allocator
-// Leave descriptor and completion
 static unsigned long _spm_current_offset = 0x0;
 
 static size_t get_spm_size() {
@@ -253,8 +252,11 @@ static inline void m5_dump_stats(uint64_t ns_delay, uint64_t ns_period)
 
 // -------------------- Xspm custom instructions (alternative to MMIO) ------
 // Uses custom-0 opcode (0x0B) with:
-//   spm.dma   rd, rs1, rs2   funct3=0  R-type  (rd=spm_dst, rs1=dram_src, rs2=len)
-//   spm.dma.w                funct3=1  I-type  (wait for DMA completion)
+//   spm.dma   rd, rs1, rs2   funct3=0  R-type  (rd=dst, rs1=src, rs2=len)
+//   spm.dma.w                funct3=1  I-type  (wait for all DMA completion)
+// Transfers are bidirectional: src/dst can be any mapped address (SPM or DRAM).
+// The DMA engine has a descriptor queue (default 4 entries); spm.dma enqueues
+// a transfer, spm.dma.w blocks until all queued transfers complete.
 // Requires gem5 built with the Xspm decoder patch.
 
 #ifdef USE_XSPM_INSN
