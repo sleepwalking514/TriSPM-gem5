@@ -270,7 +270,11 @@ static inline void xspm_dma(uintptr_t spm_dst, uintptr_t dram_src,
 
 static inline void xspm_dma_wait(void)
 {
-    asm volatile(".insn i 0x0B, 1, x0, x0, 0" : : : "memory");
+    uint64_t pending;
+    do {
+        asm volatile(".insn i 0x0B, 1, %0, x0, 0"
+                     : "=r"(pending) : : "memory");
+    } while (pending != 0);
     _fence_io();
 }
 

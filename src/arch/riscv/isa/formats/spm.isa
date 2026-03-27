@@ -20,28 +20,38 @@ def format SpmDmaOp(code, *opt_flags) {{
 }};
 
 // spm.dma.w: implemented as a Load from the DMA STATUS register.
-// The SpmDmaEngine delays the response until the DMA is complete,
-// so the CPU naturally stalls on this instruction.
+// The SpmDmaEngine returns the current pending-transfer count
+// immediately (polling semantics).  The compiler wraps this in a
+// branch-back loop, e.g.:
 //
-// IsNonSpeculative: only issue this load when it reaches the ROB head,
-//   guaranteeing that the prior spm.dma has committed and the DMA has
-//   actually started before we read the STATUS register.  All prior
-//   instructions (compute between spm.dma and spm.dma.w) will have
-//   committed by that point, enabling DMA/compute overlap for double
-//   buffering without an expensive pipeline drain.
+//     spm.dma  rd, rs1, rs2    # enqueue transfer (non-speculative)
+//   .poll:
+//     spm.dma.w  rd            # rd ← pending count
+//     bnez  rd, .poll          # spin until 0
 //
-// Removed IsSerializeBefore / IsSerializeAfter:
-//   In compiler-controlled SPM the compiler guarantees data-dependency
-//   correctness.  IsNonSpeculative already ensures all prior instructions
-//   (including the spm.dma that started the transfer) have committed
-//   before this load executes.  Dropping the serialize flags avoids a
-//   full pipeline drain on every DMA wait, which is critical for
-//   effective DMA/compute overlap in double-buffered kernels.
+// IsReadBarrier + IsWriteBarrier (memory barrier):
+//   Ensures all prior memory operations (including the MMIO write
+//   inside spm.dma) are visible before this load issues.  Unlike
+//   IsNonSpeculative, the load enters the IQ normally and can issue
+//   as soon as its memory-ordering constraints are met — it does NOT
+//   have to wait at the ROB head.  This eliminates the commit-stage
+//   stall that IsNonSpeculative caused on every DMA wait, enabling
+//   better DMA/compute overlap in double-buffered kernels.
+//
+//   Ordering with the prior spm.dma is guaranteed because:
+//     1) spm.dma is IsNonSpeculative → must commit before anything
+//        after it in program order can reach the ROB head.
+//     2) The barrier flags prevent the LSQ from issuing this load
+//        until all prior loads/stores have drained.
+//     3) In the unlikely event the load fires before spm.dma commits
+//        (speculative execution), the DMA engine returns 0 (idle) and
+//        the poll loop spins one extra iteration — the spm.dma will
+//        commit in the meantime and the next poll sees the true status.
 def format SpmDmaWaitOp(memacc_code,
         ea_code={{EA = 0xF0000018ULL;}},
         offset_code={{;}},
         mem_flags=[], inst_flags=[]) {{
-    inst_flags += ['IsNonSpeculative']
+    inst_flags += ['IsReadBarrier', 'IsWriteBarrier']
     (header_output, decoder_output, decode_block, exec_output) = \
         LoadStoreBase(name, Name, offset_code, ea_code, memacc_code,
         mem_flags, inst_flags, 'SpmDmaWait', exec_template_base='Load')

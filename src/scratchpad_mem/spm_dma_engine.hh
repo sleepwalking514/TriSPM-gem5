@@ -121,7 +121,12 @@ class SpmDmaEngine : public ClockedObject
     /** Tick at which the current transfer was initiated. */
     Tick transferStartTick;
 
-    PacketPtr pendingStatusPkt;
+    /**
+     * Tick at which the first busy-poll arrived for the current
+     * wait sequence (0 when no wait sequence is active).  Used to
+     * measure total stall cycles from first poll to completion.
+     */
+    Tick waitStartTick;
 
     EventFunctionWrapper beginReadEvent;
     EventFunctionWrapper readDoneEvent;
@@ -140,6 +145,18 @@ class SpmDmaEngine : public ClockedObject
         statistics::Scalar busyTicks;
         statistics::Formula avgLatency;
         statistics::Scalar queueFullStalls;
+
+        /** Number of STATUS polls that found DMA still busy. */
+        statistics::Scalar waitPollBusy;
+        /** Number of STATUS polls that found DMA idle (completion). */
+        statistics::Scalar waitPollIdle;
+        /**
+         * Accumulated stall cycles: elapsed ticks between the first
+         * busy-poll and the subsequent idle-poll for each wait sequence.
+         */
+        statistics::Scalar waitStallCycles;
+        /** Average stall cycles per wait sequence. */
+        statistics::Formula avgWaitStallCycles;
     } dmaStats;
 
     Tick handleRead(PacketPtr pkt);

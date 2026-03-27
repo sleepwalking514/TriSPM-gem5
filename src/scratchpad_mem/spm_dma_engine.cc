@@ -49,15 +49,31 @@ SpmDmaEngine::PioPort::recvTimingReq(PacketPtr pkt)
 {
     Addr offset = pkt->getAddr() - engine.pioAddr;
 
-    // Block STATUS reads until all transfers (including queued) complete.
-    if (pkt->isRead() && offset == REG_STATUS && !engine.isComplete()) {
-        panic_if(engine.pendingStatusPkt,
-                 "SpmDmaEngine: only one pending STATUS read supported");
-        pkt->makeResponse();
-        engine.pendingStatusPkt = pkt;
-        return true;
+    // STATUS read: polling semantics — return the current pending count
+    // immediately so the CPU can branch-poll without blocking.
+    if (pkt->isRead() && offset == REG_STATUS) {
+        uint64_t pending = engine.pendingCount();
+
+        if (pending > 0) {
+            // DMA still busy — record busy-poll for stall tracking.
+            engine.dmaStats.waitPollBusy++;
+            if (engine.waitStartTick == 0)
+                engine.waitStartTick = curTick();
+        } else {
+            // DMA idle — close the wait-stall window if one was open.
+            engine.dmaStats.waitPollIdle++;
+            if (engine.waitStartTick != 0) {
+                engine.dmaStats.waitStallCycles +=
+                    curTick() - engine.waitStartTick;
+                engine.waitStartTick = 0;
+            }
+        }
+
+        DPRINTF(SpmDma, "STATUS poll: pending=%d\n", pending);
     }
 
+    // Fall through to the normal SimpleTimingPort path which calls
+    // recvAtomic → handleRead/handleWrite and schedules the response.
     return SimpleTimingPort::recvTimingReq(pkt);
 }
 
@@ -93,7 +109,7 @@ SpmDmaEngine::SpmDmaEngine(const Params &p)
       buffer(nullptr),
       stagedSrc(0), stagedDst(0),
       transferStartTick(0),
-      pendingStatusPkt(nullptr),
+      waitStartTick(0),
       beginReadEvent([this]{ beginRead(); }, name() + ".beginRead"),
       readDoneEvent([this]{ readDone(); }, name() + ".readDone"),
       writeDoneEvent([this]{ writeDone(); }, name() + ".writeDone"),
@@ -277,13 +293,9 @@ SpmDmaEngine::transferComplete()
         return;
     }
 
-    // All transfers done — unblock any pending STATUS read.
-    if (pendingStatusPkt) {
-        pendingStatusPkt->setLE<uint64_t>(0);
-        pioPort.schedTimingResp(pendingStatusPkt, curTick() + pioDelay);
-        pendingStatusPkt = nullptr;
-        DPRINTF(SpmDma, "Unblocked pending STATUS read\n");
-    }
+    // All transfers done — the next STATUS poll will see pendingCount()==0
+    // and close the wait-stall window.  No need to actively unblock
+    // anything; the polling CPU will observe idle on its next iteration.
 
     if (drainState() == DrainState::Draining) {
         DPRINTF(SpmDma, "Drain complete\n");
@@ -317,7 +329,15 @@ SpmDmaEngine::DmaStats::DmaStats(SpmDmaEngine &_engine)
       ADD_STAT(avgLatency, statistics::units::Tick::get(),
                "Average latency per DMA transfer"),
       ADD_STAT(queueFullStalls, statistics::units::Count::get(),
-               "Enqueue attempts rejected due to full descriptor queue")
+               "Enqueue attempts rejected due to full descriptor queue"),
+      ADD_STAT(waitPollBusy, statistics::units::Count::get(),
+               "STATUS polls that found DMA engine busy"),
+      ADD_STAT(waitPollIdle, statistics::units::Count::get(),
+               "STATUS polls that found DMA engine idle (wait complete)"),
+      ADD_STAT(waitStallCycles, statistics::units::Tick::get(),
+               "Total stall cycles across all spm.dma.w wait sequences"),
+      ADD_STAT(avgWaitStallCycles, statistics::units::Tick::get(),
+               "Average stall cycles per spm.dma.w wait sequence")
 {
 }
 
@@ -326,6 +346,7 @@ SpmDmaEngine::DmaStats::regStats()
 {
     statistics::Group::regStats();
     avgLatency = busyTicks / transfers;
+    avgWaitStallCycles = waitStallCycles / waitPollIdle;
 }
 
 // ---- Free functions for ISA instructions ----

@@ -218,7 +218,7 @@ if __name__ == "__m5_main__":
     parser.add_argument("--spm_lat", type=str, default="1ns")
     parser.add_argument("--spm_bw", type=str, default="64GiB/s")
     parser.add_argument("--spm_num_banks", type=int, default=16)
-    parser.add_argument("--spm_intlv", type=int, default=4)
+    parser.add_argument("--spm_intlv", type=int, default=64)
     parser.add_argument("--max-tick", type=int, default=0)
     args = parser.parse_args()
 
