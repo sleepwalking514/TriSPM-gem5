@@ -107,12 +107,17 @@ SpmDmaEngine::SpmDmaEngine(const Params &p)
       state(Idle),
       curSrc(0), curDst(0), curLen(0),
       buffer(nullptr),
+      curHeight(1), curSrcStride(0), curDstStride(0),
+      rowsWriteComplete(0),
       stagedSrc(0), stagedDst(0),
+      stagedSrcStride(0), stagedDstStride(0), stagedHeight(0),
       transferStartTick(0),
       waitStartTick(0),
       beginReadEvent([this]{ beginRead(); }, name() + ".beginRead"),
       readDoneEvent([this]{ readDone(); }, name() + ".readDone"),
       writeDoneEvent([this]{ writeDone(); }, name() + ".writeDone"),
+      beginPipelinedReadEvent([this]{ beginPipelinedRead(); },
+                               name() + ".beginPipelinedRead"),
       dmaStats(*this)
 {
     panic_if(maxDescriptors == 0, "max_descriptors must be > 0");
@@ -125,6 +130,7 @@ SpmDmaEngine::SpmDmaEngine(const Params &p)
 SpmDmaEngine::~SpmDmaEngine()
 {
     delete[] buffer;
+    cleanupPipelinedState();
     registry.erase(system);
 }
 
@@ -155,10 +161,13 @@ SpmDmaEngine::handleRead(PacketPtr pkt)
     uint64_t val = 0;
 
     switch (offset) {
-      case REG_SRC:    val = stagedSrc;      break;
-      case REG_DST:    val = stagedDst;      break;
-      case REG_LEN:    val = curLen;          break;
-      case REG_STATUS: val = pendingCount();  break;
+      case REG_SRC:        val = stagedSrc;         break;
+      case REG_DST:        val = stagedDst;         break;
+      case REG_LEN:        val = curLen;             break;
+      case REG_STATUS:     val = pendingCount();     break;
+      case REG_SRC_STRIDE: val = stagedSrcStride;   break;
+      case REG_DST_STRIDE: val = stagedDstStride;   break;
+      case REG_HEIGHT:     val = stagedHeight;       break;
       default:
         warn("SpmDmaEngine: read from unknown offset 0x%x\n", offset);
         break;
@@ -184,9 +193,24 @@ SpmDmaEngine::handleWrite(PacketPtr pkt)
       case REG_DST:
         stagedDst = val;
         break;
+      case REG_SRC_STRIDE:
+        stagedSrcStride = val;
+        break;
+      case REG_DST_STRIDE:
+        stagedDstStride = val;
+        break;
+      case REG_HEIGHT:
+        stagedHeight = (uint32_t)val;
+        break;
       case REG_LEN:
-        if (!startCopy(stagedSrc, stagedDst, val))
+        if (!startCopy(stagedSrc, stagedDst, val,
+                       stagedSrcStride, stagedDstStride, stagedHeight))
             warn("SpmDmaEngine: descriptor queue full, transfer dropped\n");
+        // Reset staged 2D fields after enqueue so next 1D transfer
+        // doesn't accidentally inherit them.
+        stagedSrcStride = 0;
+        stagedDstStride = 0;
+        stagedHeight = 0;
         break;
       default:
         warn("SpmDmaEngine: write to unknown offset 0x%x\n", offset);
@@ -199,7 +223,9 @@ SpmDmaEngine::handleWrite(PacketPtr pkt)
 // ---- Descriptor queue + DMA logic ----
 
 bool
-SpmDmaEngine::startCopy(Addr src, Addr dst, uint64_t len)
+SpmDmaEngine::startCopy(Addr src, Addr dst, uint64_t len,
+                         uint64_t srcStride, uint64_t dstStride,
+                         uint32_t height)
 {
     if (len == 0)
         return true;
@@ -211,11 +237,20 @@ SpmDmaEngine::startCopy(Addr src, Addr dst, uint64_t len)
         return false;
     }
 
-    descQueue.push_back({src, dst, len});
+    descQueue.push_back({src, dst, len, srcStride, dstStride, height});
 
-    DPRINTF(SpmDma, "Enqueued: src=0x%x dst=0x%x len=%d "
-            "(queue depth: %d/%d)\n",
-            src, dst, len, descQueue.size(), maxDescriptors);
+    bool is2D = height > 1;
+    if (is2D) {
+        DPRINTF(SpmDma, "Enqueued 2D: src=0x%x dst=0x%x width=%d height=%d "
+                "srcStride=%d dstStride=%d (queue depth: %d/%d)\n",
+                src, dst, len, height,
+                srcStride, dstStride,
+                descQueue.size(), maxDescriptors);
+    } else {
+        DPRINTF(SpmDma, "Enqueued 1D: src=0x%x dst=0x%x len=%d "
+                "(queue depth: %d/%d)\n",
+                src, dst, len, descQueue.size(), maxDescriptors);
+    }
 
     if (state == Idle)
         startNextTransfer();
@@ -235,20 +270,55 @@ SpmDmaEngine::startNextTransfer()
     curSrc = desc.src;
     curDst = desc.dst;
     curLen = desc.len;
-    buffer = new uint8_t[curLen];
+    curSrcStride = desc.srcStride;
+    curDstStride = desc.dstStride;
+    curHeight = (desc.height > 1) ? desc.height : 1;
     state  = Reading;
     transferStartTick = curTick();
 
-    DPRINTF(SpmDma, "Starting transfer: src=0x%x dst=0x%x len=%d "
-            "(desc_latency=%d ticks)\n",
-            curSrc, curDst, curLen, descLatency);
+    if (curHeight > 1) {
+        // --- 2D pipelined path ---
+        DPRINTF(SpmDma, "Starting 2D pipelined transfer: src=0x%x dst=0x%x "
+                "width=%d height=%d srcStride=%d dstStride=%d "
+                "(desc_latency=%d ticks)\n",
+                curSrc, curDst, curLen, curHeight,
+                curSrcStride, curDstStride, descLatency);
 
-    schedule(beginReadEvent, curTick() + descLatency);
+        // Allocate per-row buffers and events
+        rowsWriteComplete = 0;
+        rowBuffers.resize(curHeight);
+        rowReadDoneEvents.resize(curHeight);
+        rowWriteDoneEvents.resize(curHeight);
+
+        for (uint32_t r = 0; r < curHeight; r++) {
+            rowBuffers[r] = new uint8_t[curLen];
+            rowReadDoneEvents[r] = new EventFunctionWrapper(
+                [this, r]{ pipelinedRowReadDone(r); },
+                name() + ".rowReadDone");
+            rowWriteDoneEvents[r] = new EventFunctionWrapper(
+                [this, r]{ pipelinedRowWriteDone(r); },
+                name() + ".rowWriteDone");
+        }
+
+        schedule(beginPipelinedReadEvent, curTick() + descLatency);
+    } else {
+        // --- 1D path (unchanged) ---
+        buffer = new uint8_t[curLen];
+
+        DPRINTF(SpmDma, "Starting 1D transfer: src=0x%x dst=0x%x len=%d "
+                "(desc_latency=%d ticks)\n",
+                curSrc, curDst, curLen, descLatency);
+
+        schedule(beginReadEvent, curTick() + descLatency);
+    }
 }
+
+// ---- 1D path (unchanged from original) ----
 
 void
 SpmDmaEngine::beginRead()
 {
+    DPRINTF(SpmDma, "beginRead: 1D, src=0x%x, %d bytes\n", curSrc, curLen);
     dmaPort.dmaAction(MemCmd::ReadReq, curSrc, curLen,
                       &readDoneEvent, buffer, 0);
 }
@@ -256,9 +326,8 @@ SpmDmaEngine::beginRead()
 void
 SpmDmaEngine::readDone()
 {
-    DPRINTF(SpmDma, "readDone: writing %d bytes to dst=0x%x\n",
+    DPRINTF(SpmDma, "readDone: 1D, writing %d bytes to dst=0x%x\n",
             curLen, curDst);
-
     state = Writing;
     dmaPort.dmaAction(MemCmd::WriteReq, curDst, curLen,
                       &writeDoneEvent, buffer, 0);
@@ -267,20 +336,84 @@ SpmDmaEngine::readDone()
 void
 SpmDmaEngine::writeDone()
 {
-    DPRINTF(SpmDma, "writeDone: transfer complete\n");
+    DPRINTF(SpmDma, "writeDone: 1D complete\n");
+    dmaStats.rowsTransferred++;
+    dmaStats.bytesTransferred += curLen;
     transferComplete();
+}
+
+// ---- 2D pipelined path ----
+
+void
+SpmDmaEngine::beginPipelinedRead()
+{
+    DPRINTF(SpmDma, "beginPipelinedRead: issuing %d row reads in parallel, "
+            "%d bytes each\n", curHeight, curLen);
+
+    // Issue all row reads concurrently — DmaPort queues them internally
+    // and pipelines the memory accesses.
+    for (uint32_t r = 0; r < curHeight; r++) {
+        Addr rowSrc = curSrc + (uint64_t)r * curSrcStride;
+        DPRINTF(SpmDma, "  row %d: read src=0x%x\n", r, rowSrc);
+        dmaPort.dmaAction(MemCmd::ReadReq, rowSrc, curLen,
+                          rowReadDoneEvents[r], rowBuffers[r], 0);
+    }
+}
+
+void
+SpmDmaEngine::pipelinedRowReadDone(int row)
+{
+    // This row's read is complete — immediately start writing it.
+    Addr rowDst = curDst + (uint64_t)row * curDstStride;
+    DPRINTF(SpmDma, "pipelinedRowReadDone: row %d/%d, writing %d bytes "
+            "to dst=0x%x\n", row, curHeight, curLen, rowDst);
+
+    dmaPort.dmaAction(MemCmd::WriteReq, rowDst, curLen,
+                      rowWriteDoneEvents[row], rowBuffers[row], 0);
+}
+
+void
+SpmDmaEngine::pipelinedRowWriteDone(int row)
+{
+    DPRINTF(SpmDma, "pipelinedRowWriteDone: row %d/%d complete\n",
+            row, curHeight);
+
+    dmaStats.rowsTransferred++;
+    dmaStats.bytesTransferred += curLen;
+    rowsWriteComplete++;
+
+    if ((uint32_t)rowsWriteComplete >= curHeight) {
+        // All rows done — clean up and complete the transfer.
+        cleanupPipelinedState();
+        transferComplete();
+    }
+}
+
+void
+SpmDmaEngine::cleanupPipelinedState()
+{
+    for (uint32_t r = 0; r < rowBuffers.size(); r++) {
+        delete[] rowBuffers[r];
+        delete rowReadDoneEvents[r];
+        delete rowWriteDoneEvents[r];
+    }
+    rowBuffers.clear();
+    rowReadDoneEvents.clear();
+    rowWriteDoneEvents.clear();
 }
 
 void
 SpmDmaEngine::transferComplete()
 {
     dmaStats.transfers++;
-    dmaStats.bytesTransferred += curLen;
+    if (curHeight > 1)
+        dmaStats.transfers2D++;
     dmaStats.busyTicks += curTick() - transferStartTick;
 
-    DPRINTF(SpmDma, "Transfer complete: %d bytes, latency=%d ticks "
-            "(remaining in queue: %d)\n",
-            curLen, curTick() - transferStartTick,
+    DPRINTF(SpmDma, "Transfer complete: %d bytes (%d rows x %d), "
+            "latency=%d ticks (remaining in queue: %d)\n",
+            (uint64_t)curLen * curHeight, curHeight, curLen,
+            curTick() - transferStartTick,
             (unsigned)descQueue.size());
 
     delete[] buffer;
@@ -321,7 +454,11 @@ SpmDmaEngine::drain()
 SpmDmaEngine::DmaStats::DmaStats(SpmDmaEngine &_engine)
     : statistics::Group(&_engine),
       ADD_STAT(transfers, statistics::units::Count::get(),
-               "Total DMA transfers completed"),
+               "Total DMA transfers completed (1D + 2D descriptors)"),
+      ADD_STAT(transfers2D, statistics::units::Count::get(),
+               "Total 2D DMA transfers completed"),
+      ADD_STAT(rowsTransferred, statistics::units::Count::get(),
+               "Total rows transferred (1D counts as 1 row each)"),
       ADD_STAT(bytesTransferred, statistics::units::Byte::get(),
                "Total bytes transferred by DMA"),
       ADD_STAT(busyTicks, statistics::units::Tick::get(),
@@ -358,6 +495,38 @@ spmDmaStartCopy(ThreadContext *tc, Addr src, Addr dst, uint64_t len)
     panic_if(!eng, "spmDmaStartCopy: no SpmDmaEngine registered "
              "for this System");
     return eng->startCopy(src, dst, len);
+}
+
+bool
+spmDmaStartCopy2D(ThreadContext *tc, Addr src, Addr dst,
+                   uint64_t width, uint32_t height,
+                   uint64_t srcStride, uint64_t dstStride)
+{
+    auto *eng = SpmDmaEngine::lookup(tc->getSystemPtr());
+    panic_if(!eng, "spmDmaStartCopy2D: no SpmDmaEngine registered "
+             "for this System");
+    return eng->startCopy(src, dst, width, srcStride, dstStride, height);
+}
+
+void
+spmDmaSetStride(ThreadContext *tc, uint64_t srcStride, uint64_t dstStride)
+{
+    auto *eng = SpmDmaEngine::lookup(tc->getSystemPtr());
+    panic_if(!eng, "spmDmaSetStride: no SpmDmaEngine registered "
+             "for this System");
+    eng->setStride(srcStride, dstStride);
+}
+
+bool
+spmDmaStartCopy2DStaged(ThreadContext *tc, Addr src, Addr dst,
+                         uint64_t width, uint32_t height)
+{
+    auto *eng = SpmDmaEngine::lookup(tc->getSystemPtr());
+    panic_if(!eng, "spmDmaStartCopy2DStaged: no SpmDmaEngine registered "
+             "for this System");
+    uint64_t srcStr = eng->getStagedSrcStride();
+    uint64_t dstStr = eng->getStagedDstStride();
+    return eng->startCopy(src, dst, width, srcStr, dstStr, height);
 }
 
 bool

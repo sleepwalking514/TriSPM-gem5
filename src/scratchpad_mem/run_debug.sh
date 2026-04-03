@@ -50,7 +50,7 @@ if [ "$TRACE" -eq 1 ]; then
     echo "=== Debug trace -> m5out/debug_trace.txt ==="
 fi
 
-PYFLAGS="--binary $BIN --spm_size 64KiB"
+PYFLAGS="--binary $BIN"
 
 echo "=== Running gem5 ==="
 if [ -n "$MAX_TICK" ]; then

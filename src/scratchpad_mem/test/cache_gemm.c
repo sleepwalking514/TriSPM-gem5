@@ -68,8 +68,10 @@ int main(void)
 
     m5_dump_stats(0, 0);
 
-    free(a);
-    free(b);
-    free(c);
-    return 0;
+    /* Touch result to prevent dead-code elimination */
+    volatile int sink = 0;
+    for (int i = 0; i < N * N; i++)
+        sink += ((volatile int *)c)[i];
+
+    return sink & 0;
 }

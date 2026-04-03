@@ -6490,7 +6490,7 @@ decode QUADRANT default Unknown::unknown() {
 
         // Xspm: custom-0 opcode (0x0B), OPCODE5 = 0x02
         0x02: decode FUNCT3 {
-            // spm.dma rd, rs1, rs2 -- initiate async DMA
+            // spm.dma rd, rs1, rs2 -- initiate async 1D DMA
             //   rd  = SPM destination address (echoed back)
             //   rs1 = DRAM source address
             //   rs2 = byte count
@@ -6503,6 +6503,26 @@ decode QUADRANT default Unknown::unknown() {
             // SpmDmaEngine delays the response until DMA is done.
             0x1: SpmDmaWaitOp::spm_dma_w({{
                 Rd_sd = Mem_sd;
+            }});
+            // spm.dma.stride rs1, rs2 -- stage strides for next 2D DMA
+            //   rs1 = source stride (bytes between rows)
+            //   rs2 = destination stride (bytes between rows)
+            0x2: SpmDmaOp::spm_dma_stride({{
+                spmDmaSetStride(xc->tcBase(), Rs1, Rs2);
+                Rd = 0;
+            }});
+            // spm.dma.2d rd, rs1, rs2 -- initiate async 2D DMA
+            //   rd  = destination address (echoed back)
+            //   rs1 = source address
+            //   rs2 = width (low 32 bits) | height (high 32 bits)
+            //   Uses strides set by preceding spm.dma.stride.
+            0x3: SpmDmaOp::spm_dma_2d({{
+                uint64_t wh = Rs2;
+                uint32_t width  = (uint32_t)(wh & 0xFFFFFFFFULL);
+                uint32_t height = (uint32_t)(wh >> 32);
+                spmDmaStartCopy2DStaged(xc->tcBase(), Rs1, Rd,
+                                        width, height);
+                Rd = Rd;
             }});
         }
 

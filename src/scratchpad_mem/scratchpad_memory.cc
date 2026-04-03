@@ -211,7 +211,14 @@ ScratchpadMemory::recvTimingReq(PacketPtr pkt, int portId)
             packetQueue.emplace(++i, pkt, when_to_send, portId);
         }
 
-        if (!retryResp_[portId] && !dequeueEvent.scheduled())
+        // Only schedule the dequeue event if NO port is waiting for a
+        // response retry.  The packet queue is shared, so the front packet
+        // might belong to a different port that is currently blocked.
+        bool anyRetry = false;
+        for (int p = 0; p < NUM_PORTS; p++)
+            anyRetry |= retryResp_[p];
+
+        if (!anyRetry && !dequeueEvent.scheduled())
             schedule(dequeueEvent, packetQueue.back().tick);
     } else {
         pendingDelete.reset(pkt);

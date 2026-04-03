@@ -21,10 +21,15 @@ riscv64-unknown-linux-gnu-gcc -O3 -static \
     -DN=${MAT_N} -DBS=${MAT_BS} \
     -o cache_gemm ./cache_gemm.c
 
-# SPM + custom instructions
+# SPM + custom instructions (1D DMA, block-contiguous layout)
 riscv64-unknown-linux-gnu-gcc -O3 -static \
     -DN=${MAT_N} -DBS=${MAT_BS} \
     -o spm_gemmX ./spm_gemmX.c
+
+# SPM + 2D DMA (row-major layout, double-buffered)
+riscv64-unknown-linux-gnu-gcc -O3 -static \
+    -DN=${MAT_N} -DBS=${MAT_BS} \
+    -o spm_gemm_2d ./spm_gemm_2d.c
 
 cd ..
 
@@ -50,9 +55,14 @@ cd ..
 # gem5.opt run_spm_v3.py --binary ./test/spm_gemmX
 # mv m5out/stats.txt "m5out/spm_v3_gemmX_${TAG}.txt"
 
-# SPM + custom 指令 v4
-echo "--- spm gemmX ---"
-gem5.opt run_spm.py --binary ./test/spm_gemmX --spm_intlv 64
-mv m5out/stats.txt "m5out/spm_gemmX_${TAG}.txt"
+# # SPM + custom 指令 v4 (1D DMA)
+# echo "--- spm gemmX (1D) ---"
+# gem5.opt run_spm.py --binary ./test/spm_gemmX --spm_size 512MiB
+# mv m5out/stats.txt "m5out/spm_gemmX_${TAG}.txt"
+
+# SPM + 2D DMA (row-major, double-buffered)
+echo "--- spm gemm_2d (2D DMA) ---"
+gem5.opt run_spm.py --binary ./test/spm_gemm_2d --spm_size 512MiB
+mv m5out/stats.txt "m5out/spm_gemm_2d_${TAG}.txt"
 
 echo "===== done ====="

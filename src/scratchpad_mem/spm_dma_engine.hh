@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <deque>
 #include <unordered_map>
+#include <vector>
 
 #include "dev/dma_device.hh"
 #include "mem/tport.hh"
@@ -19,9 +20,19 @@ namespace gem5
 /**
  * DMA engine for scratchpad memory with a multi-entry descriptor queue.
  *
- * Supports two programming interfaces:
- *   1) MMIO: write SRC, DST, then LEN (writing LEN enqueues a transfer)
- *   2) Custom ISA: spm.dma enqueues, spm.dma.w waits for all completion
+ * Supports 1D (linear) and 2D (strided) transfers.
+ *
+ * Programming interfaces:
+ *   1) MMIO: write SRC, DST, [SRC_STRIDE, DST_STRIDE, HEIGHT,] then LEN
+ *      (writing LEN enqueues a transfer).  When HEIGHT <= 1 or stride
+ *      registers are never written, the engine operates in 1D mode.
+ *   2) Custom ISA: spm.dma enqueues (1D), spm.dma.w waits for completion
+ *
+ * 2D transfers copy HEIGHT rows of LEN bytes each, advancing the source
+ * pointer by SRC_STRIDE and the destination pointer by DST_STRIDE per
+ * row.  Internally the engine issues all row reads in parallel and
+ * starts writing each row as soon as its read completes, fully
+ * pipelining read/write across rows for maximum throughput.
  *
  * The descriptor queue allows multiple transfers to be queued (default 4),
  * enabling the compiler to overlap DMA load/store with computation
@@ -44,8 +55,24 @@ class SpmDmaEngine : public ClockedObject
     /**
      * Enqueue a DMA transfer.  Returns true if successfully queued,
      * false if the descriptor queue is full (caller should retry).
+     *
+     * 1D form: startCopy(src, dst, len) — len contiguous bytes.
+     * 2D form: startCopy(src, dst, width, srcStride, dstStride, height)
+     *          — copies height rows of width bytes each.
      */
-    bool startCopy(Addr src, Addr dst, uint64_t len);
+    bool startCopy(Addr src, Addr dst, uint64_t len,
+                   uint64_t srcStride = 0, uint64_t dstStride = 0,
+                   uint32_t height = 0);
+
+    /** Stage stride values for a subsequent startCopy (ISA path). */
+    void setStride(uint64_t srcStride, uint64_t dstStride) {
+        stagedSrcStride = srcStride;
+        stagedDstStride = dstStride;
+    }
+
+    /** Read back staged strides (for ISA 2D instruction). */
+    uint64_t getStagedSrcStride() const { return stagedSrcStride; }
+    uint64_t getStagedDstStride() const { return stagedDstStride; }
 
     /** True when all transfers have completed and the queue is empty. */
     bool isComplete() const { return state == Idle && descQueue.empty(); }
@@ -71,13 +98,19 @@ class SpmDmaEngine : public ClockedObject
     struct Descriptor {
         Addr src;
         Addr dst;
-        uint64_t len;
+        uint64_t len;       // 1D: total bytes; 2D: bytes per row (width)
+        uint64_t srcStride; // 2D: source row pitch in bytes (0 = 1D)
+        uint64_t dstStride; // 2D: dest row pitch in bytes (0 = 1D)
+        uint32_t height;    // 2D: number of rows (0 or 1 = 1D mode)
     };
 
-    static constexpr Addr REG_SRC    = 0x00;
-    static constexpr Addr REG_DST    = 0x08;
-    static constexpr Addr REG_LEN    = 0x10;
-    static constexpr Addr REG_STATUS = 0x18;
+    static constexpr Addr REG_SRC        = 0x00;
+    static constexpr Addr REG_DST        = 0x08;
+    static constexpr Addr REG_LEN        = 0x10;
+    static constexpr Addr REG_STATUS     = 0x18;
+    static constexpr Addr REG_SRC_STRIDE = 0x20;
+    static constexpr Addr REG_DST_STRIDE = 0x28;
+    static constexpr Addr REG_HEIGHT     = 0x30;
 
     enum State { Idle, Reading, Writing };
 
@@ -112,11 +145,27 @@ class SpmDmaEngine : public ClockedObject
     Addr curSrc;
     Addr curDst;
     uint64_t curLen;
+
+    // 1D transfer buffer (used only when curHeight <= 1)
     uint8_t *buffer;
+
+    // 2D pipelined state
+    uint32_t curHeight;    // total rows (1 for 1D transfers)
+    uint64_t curSrcStride; // source row pitch in bytes
+    uint64_t curDstStride; // destination row pitch in bytes
+
+    // For pipelined 2D: per-row buffers and event objects
+    std::vector<uint8_t*> rowBuffers;
+    std::vector<EventFunctionWrapper*> rowReadDoneEvents;
+    std::vector<EventFunctionWrapper*> rowWriteDoneEvents;
+    int rowsWriteComplete;  // counter for completed row writes
 
     // Staged MMIO register values (written via SRC/DST before LEN enqueues)
     Addr stagedSrc;
     Addr stagedDst;
+    uint64_t stagedSrcStride;
+    uint64_t stagedDstStride;
+    uint32_t stagedHeight;
 
     /** Tick at which the current transfer was initiated. */
     Tick transferStartTick;
@@ -128,9 +177,13 @@ class SpmDmaEngine : public ClockedObject
      */
     Tick waitStartTick;
 
+    // Events for 1D path
     EventFunctionWrapper beginReadEvent;
     EventFunctionWrapper readDoneEvent;
     EventFunctionWrapper writeDoneEvent;
+
+    // Event for 2D pipelined path: kicks off all row reads after desc_latency
+    EventFunctionWrapper beginPipelinedReadEvent;
 
     // Per-System registry (replaces singleton)
     static std::unordered_map<System*, SpmDmaEngine*> registry;
@@ -141,6 +194,8 @@ class SpmDmaEngine : public ClockedObject
         void regStats() override;
 
         statistics::Scalar transfers;
+        statistics::Scalar transfers2D;
+        statistics::Scalar rowsTransferred;
         statistics::Scalar bytesTransferred;
         statistics::Scalar busyTicks;
         statistics::Formula avgLatency;
@@ -163,9 +218,13 @@ class SpmDmaEngine : public ClockedObject
     Tick handleWrite(PacketPtr pkt);
 
     void startNextTransfer();
-    void beginRead();
-    void readDone();
-    void writeDone();
+    void beginRead();        // 1D path: single read
+    void readDone();         // 1D path: single read done
+    void writeDone();        // 1D path: single write done
+    void beginPipelinedRead(); // 2D path: issue all row reads
+    void pipelinedRowReadDone(int row);  // 2D path: one row read done
+    void pipelinedRowWriteDone(int row); // 2D path: one row write done
+    void cleanupPipelinedState();        // 2D path: free per-row resources
     void transferComplete();
 };
 

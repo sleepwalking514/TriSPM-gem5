@@ -29,13 +29,23 @@ extern "C" {
 
 
 // -------------------- SpmDmaEngine register offsets --------------------------
-// 4-register MMIO interface with descriptor queue (default depth: 4).
-// Write SRC, DST, then LEN (writing LEN enqueues a DMA transfer).
+// 7-register MMIO interface with descriptor queue (default depth: 4).
+//
+// 1D transfer: Write SRC, DST, then LEN (writing LEN enqueues).
+// 2D transfer: Write SRC, DST, SRC_STRIDE, DST_STRIDE, HEIGHT, then LEN.
+//   The engine copies HEIGHT rows of LEN bytes each, advancing source by
+//   SRC_STRIDE and destination by DST_STRIDE per row.
+//   When HEIGHT <= 1, the transfer is 1D (stride is ignored).
+//   The stride/height registers are auto-cleared after each enqueue.
+//
 // Read STATUS to check completion (0 = all idle, >0 = pending+active count).
 #define DMA_REG_SRC          0x00
 #define DMA_REG_DST          0x08
 #define DMA_REG_LEN          0x10
 #define DMA_REG_STATUS       0x18
+#define DMA_REG_SRC_STRIDE   0x20
+#define DMA_REG_DST_STRIDE   0x28
+#define DMA_REG_HEIGHT       0x30
 
 
 // -------------------- Low-level MMIO helpers (RV64) --------------------------
@@ -225,6 +235,46 @@ static inline int spm_dma_copy(void *dst, const void *src, size_t nbytes)
     return spm_dma_wait();
 }
 
+// 2D strided DMA: copy a rectangular tile.
+//   dst        - destination base address (SPM or DRAM)
+//   src        - source base address (DRAM or SPM)
+//   width      - bytes per row to transfer
+//   height     - number of rows
+//   src_stride - byte distance between consecutive source rows
+//   dst_stride - byte distance between consecutive destination rows
+static inline int spm_dma_copy_2d(void *dst, const void *src,
+                                  size_t width, size_t height,
+                                  size_t src_stride, size_t dst_stride)
+{
+    if (width == 0 || height == 0) return 0;
+
+    dma_write64(DMA_REG_SRC, (uint64_t)(uintptr_t)src);
+    dma_write64(DMA_REG_DST, (uint64_t)(uintptr_t)dst);
+    dma_write64(DMA_REG_SRC_STRIDE, (uint64_t)src_stride);
+    dma_write64(DMA_REG_DST_STRIDE, (uint64_t)dst_stride);
+    dma_write64(DMA_REG_HEIGHT, (uint64_t)height);
+    _fence_io();
+    dma_write64(DMA_REG_LEN, (uint64_t)width);  // writing LEN enqueues
+    _fence_io();
+
+    return spm_dma_wait();
+}
+
+// 2D async enqueue (non-blocking, caller must call spm_dma_wait() later)
+static inline void spm_dma_enqueue_2d(void *dst, const void *src,
+                                      size_t width, size_t height,
+                                      size_t src_stride, size_t dst_stride)
+{
+    dma_write64(DMA_REG_SRC, (uint64_t)(uintptr_t)src);
+    dma_write64(DMA_REG_DST, (uint64_t)(uintptr_t)dst);
+    dma_write64(DMA_REG_SRC_STRIDE, (uint64_t)src_stride);
+    dma_write64(DMA_REG_DST_STRIDE, (uint64_t)dst_stride);
+    dma_write64(DMA_REG_HEIGHT, (uint64_t)height);
+    _fence_io();
+    dma_write64(DMA_REG_LEN, (uint64_t)width);
+    _fence_io();
+}
+
 // -------------------- gem5 m5ops pseudo-instructions (RISC-V) ------
 // Encoding: .word 0x0000007b | (func << 25)
 // See util/m5/src/abi/riscv/m5op.S
@@ -252,8 +302,16 @@ static inline void m5_dump_stats(uint64_t ns_delay, uint64_t ns_period)
 
 // -------------------- Xspm custom instructions (alternative to MMIO) ------
 // Uses custom-0 opcode (0x0B) with:
-//   spm.dma   rd, rs1, rs2   funct3=0  R-type  (rd=dst, rs1=src, rs2=len)
-//   spm.dma.w                funct3=1  I-type  (wait for all DMA completion)
+//   spm.dma        rd, rs1, rs2   funct3=0  R-type  (rd=dst, rs1=src, rs2=len)
+//   spm.dma.w      rd             funct3=1  I-type  (wait for all DMA completion)
+//   spm.dma.stride rs1, rs2       funct3=2  R-type  (rs1=src_stride, rs2=dst_stride)
+//   spm.dma.2d     rd, rs1, rs2   funct3=3  R-type  (rd=dst, rs1=src, rs2=width|height)
+//
+// 2D usage sequence:
+//   spm.dma.stride  x_src_stride, x_dst_stride   // stage strides
+//   spm.dma.2d      x_dst, x_src, x_wh           // enqueue (width=low32, height=high32)
+//   spm.dma.w       x_status                      // poll for completion
+//
 // Transfers are bidirectional: src/dst can be any mapped address (SPM or DRAM).
 // The DMA engine has a descriptor queue (default 4 entries); spm.dma enqueues
 // a transfer, spm.dma.w blocks until all queued transfers complete.
@@ -276,6 +334,37 @@ static inline void xspm_dma_wait(void)
                      : "=r"(pending) : : "memory");
     } while (pending != 0);
     _fence_io();
+}
+
+// Stage source and destination strides for the next spm.dma.2d.
+static inline void xspm_dma_stride(uint64_t src_stride, uint64_t dst_stride)
+{
+    asm volatile(".insn r 0x0B, 2, 0, x0, %0, %1"
+                 : : "r"(src_stride), "r"(dst_stride) : "memory");
+}
+
+// Enqueue a 2D strided DMA transfer.
+//   dst        - destination base address
+//   src        - source base address
+//   width      - bytes per row (must fit in 32 bits)
+//   height     - number of rows (must fit in 32 bits)
+// Strides must have been set by a preceding xspm_dma_stride() call.
+static inline void xspm_dma_2d(uintptr_t dst, uintptr_t src,
+                                uint32_t width, uint32_t height)
+{
+    uint64_t wh = (uint64_t)width | ((uint64_t)height << 32);
+    asm volatile(".insn r 0x0B, 3, 0, %0, %1, %2"
+                 : : "r"(dst), "r"(src), "r"(wh) : "memory");
+}
+
+// Convenience: 2D DMA + wait (blocking).
+static inline void xspm_dma_copy_2d(uintptr_t dst, uintptr_t src,
+                                     uint32_t width, uint32_t height,
+                                     uint64_t src_stride, uint64_t dst_stride)
+{
+    xspm_dma_stride(src_stride, dst_stride);
+    xspm_dma_2d(dst, src, width, height);
+    xspm_dma_wait();
 }
 
 #endif /* USE_XSPM_INSN */

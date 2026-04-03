@@ -44,16 +44,27 @@ static inline int *blk_c(int *base, int bi, int bj)
     return base + (bi * NB + bj) * BLOCK_ELEMS;
 }
 
-/* ---------- BS*BS micro-kernel: C += A * B  (ikj, scalar promotion) --- */
+/* ---------- BS*BS micro-kernel: C = A * B (first) or C += A * B --- */
 
-static void block_matmul(const int *a, const int *b, int *c)
+static inline void block_matmul(const int *restrict a, const int *restrict b,
+                                 int *restrict c, int is_first)
 {
-    for (int i = 0; i < BS; i++)
-        for (int k = 0; k < BS; k++) {
-            int aik = a[i * BS + k];
-            for (int j = 0; j < BS; j++)
-                c[i * BS + j] += aik * b[k * BS + j];
-        }
+    if (is_first) {
+        for (int i = 0; i < BS; i++)
+            for (int k = 0; k < BS; k++) {
+                int aik = a[i * BS + k];
+                for (int j = 0; j < BS; j++)
+                    c[i * BS + j] = (k == 0) ? aik * b[k * BS + j]
+                                              : c[i * BS + j] + aik * b[k * BS + j];
+            }
+    } else {
+        for (int i = 0; i < BS; i++)
+            for (int k = 0; k < BS; k++) {
+                int aik = a[i * BS + k];
+                for (int j = 0; j < BS; j++)
+                    c[i * BS + j] += aik * b[k * BS + j];
+            }
+    }
 }
 
 /*
@@ -106,8 +117,6 @@ void blocked_gemm(const int *restrict a, const int *restrict b,
 
     for (int bi = 0; bi < NB; bi++) {
 
-        spm_memset(spm_c, 0, NB * BLOCK_BYTES);
-
         /* ---- Prime: load A[bi,0] and B[0,0] concurrently ---- */
         xspm_dma((uintptr_t)spm_a0,
                  (uintptr_t)blk_a(a, bi, 0), BLOCK_BYTES);
@@ -145,9 +154,8 @@ void blocked_gemm(const int *restrict a, const int *restrict b,
                     next_bk_b = nxt_b;
                 }
 
-                /* Compute overlaps with in-flight DMA */
-                block_matmul(cur_a, cur_b,
-                             spm_c + bj * BLOCK_ELEMS);
+                /* Compute: first bk uses = instead of += to avoid memset */
+                block_matmul(cur_a, cur_b, spm_c + bj * BLOCK_ELEMS, bk == 0);
 
                 if (n_prefetch > 0)
                     xspm_dma_wait();
@@ -220,5 +228,10 @@ int main(void)
 
     m5_dump_stats(0, 0);
 
-    return 0;
+    /* Touch result to prevent dead-code elimination of blocked_gemm */
+    volatile int sink = 0;
+    for (int i = 0; i < N * N; i++)
+        sink += ((volatile int *)c)[i];
+
+    return sink & 0;
 }
