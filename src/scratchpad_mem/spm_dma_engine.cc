@@ -64,7 +64,7 @@ SpmDmaEngine::PioPort::recvTimingReq(PacketPtr pkt)
             engine.dmaStats.waitPollIdle++;
             if (engine.waitStartTick != 0) {
                 engine.dmaStats.waitStallCycles +=
-                    curTick() - engine.waitStartTick;
+                    engine.ticksToCycles(curTick() - engine.waitStartTick);
                 engine.waitStartTick = 0;
             }
         }
@@ -408,7 +408,7 @@ SpmDmaEngine::transferComplete()
     dmaStats.transfers++;
     if (curHeight > 1)
         dmaStats.transfers2D++;
-    dmaStats.busyTicks += curTick() - transferStartTick;
+    dmaStats.busyCycles += ticksToCycles(curTick() - transferStartTick);
 
     DPRINTF(SpmDma, "Transfer complete: %d bytes (%d rows x %d), "
             "latency=%d ticks (remaining in queue: %d)\n",
@@ -461,19 +461,19 @@ SpmDmaEngine::DmaStats::DmaStats(SpmDmaEngine &_engine)
                "Total rows transferred (1D counts as 1 row each)"),
       ADD_STAT(bytesTransferred, statistics::units::Byte::get(),
                "Total bytes transferred by DMA"),
-      ADD_STAT(busyTicks, statistics::units::Tick::get(),
-               "Total ticks DMA engine was busy"),
-      ADD_STAT(avgLatency, statistics::units::Tick::get(),
-               "Average latency per DMA transfer"),
+      ADD_STAT(busyCycles, statistics::units::Cycle::get(),
+               "Total cycles DMA engine was busy"),
+      ADD_STAT(avgLatency, statistics::units::Cycle::get(),
+               "Average cycles per DMA transfer"),
       ADD_STAT(queueFullStalls, statistics::units::Count::get(),
                "Enqueue attempts rejected due to full descriptor queue"),
       ADD_STAT(waitPollBusy, statistics::units::Count::get(),
                "STATUS polls that found DMA engine busy"),
       ADD_STAT(waitPollIdle, statistics::units::Count::get(),
                "STATUS polls that found DMA engine idle (wait complete)"),
-      ADD_STAT(waitStallCycles, statistics::units::Tick::get(),
+      ADD_STAT(waitStallCycles, statistics::units::Cycle::get(),
                "Total stall cycles across all spm.dma.w wait sequences"),
-      ADD_STAT(avgWaitStallCycles, statistics::units::Tick::get(),
+      ADD_STAT(avgWaitStallCycles, statistics::units::Cycle::get(),
                "Average stall cycles per spm.dma.w wait sequence")
 {
 }
@@ -482,7 +482,7 @@ void
 SpmDmaEngine::DmaStats::regStats()
 {
     statistics::Group::regStats();
-    avgLatency = busyTicks / transfers;
+    avgLatency = busyCycles / transfers;
     avgWaitStallCycles = waitStallCycles / waitPollIdle;
 }
 

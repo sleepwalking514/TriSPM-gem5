@@ -197,7 +197,7 @@ class SpmDmaEngine : public ClockedObject
         statistics::Scalar transfers2D;
         statistics::Scalar rowsTransferred;
         statistics::Scalar bytesTransferred;
-        statistics::Scalar busyTicks;
+        statistics::Scalar busyCycles;
         statistics::Formula avgLatency;
         statistics::Scalar queueFullStalls;
 
@@ -206,7 +206,7 @@ class SpmDmaEngine : public ClockedObject
         /** Number of STATUS polls that found DMA idle (completion). */
         statistics::Scalar waitPollIdle;
         /**
-         * Accumulated stall cycles: elapsed ticks between the first
+         * Accumulated stall cycles: elapsed cycles between the first
          * busy-poll and the subsequent idle-poll for each wait sequence.
          */
         statistics::Scalar waitStallCycles;
