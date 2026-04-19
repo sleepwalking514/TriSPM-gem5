@@ -62,7 +62,7 @@ class SpmDmaEngine : public ClockedObject
      */
     bool startCopy(Addr src, Addr dst, uint64_t len,
                    uint64_t srcStride = 0, uint64_t dstStride = 0,
-                   uint32_t height = 0);
+                   uint32_t height = 1);
 
     /** Stage stride values for a subsequent startCopy (ISA path). */
     void setStride(uint64_t srcStride, uint64_t dstStride) {

@@ -110,7 +110,7 @@ SpmDmaEngine::SpmDmaEngine(const Params &p)
       curHeight(1), curSrcStride(0), curDstStride(0),
       rowsWriteComplete(0),
       stagedSrc(0), stagedDst(0),
-      stagedSrcStride(0), stagedDstStride(0), stagedHeight(0),
+      stagedSrcStride(0), stagedDstStride(0), stagedHeight(1),
       transferStartTick(0),
       waitStartTick(0),
       beginReadEvent([this]{ beginRead(); }, name() + ".beginRead"),
@@ -210,7 +210,7 @@ SpmDmaEngine::handleWrite(PacketPtr pkt)
         // doesn't accidentally inherit them.
         stagedSrcStride = 0;
         stagedDstStride = 0;
-        stagedHeight = 0;
+        stagedHeight = 1;
         break;
       default:
         warn("SpmDmaEngine: write to unknown offset 0x%x\n", offset);
@@ -272,7 +272,7 @@ SpmDmaEngine::startNextTransfer()
     curLen = desc.len;
     curSrcStride = desc.srcStride;
     curDstStride = desc.dstStride;
-    curHeight = (desc.height > 1) ? desc.height : 1;
+    curHeight = desc.height;
     state  = Reading;
     transferStartTick = curTick();
 
