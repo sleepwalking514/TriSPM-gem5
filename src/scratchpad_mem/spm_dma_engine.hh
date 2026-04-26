@@ -226,6 +226,17 @@ class SpmDmaEngine : public ClockedObject
     void pipelinedRowWriteDone(int row); // 2D path: one row write done
     void cleanupPipelinedState();        // 2D path: free per-row resources
     void transferComplete();
+
+    // SE-mode VA→PA translation via the process page table.
+    Addr translateAddr(Addr vaddr);
+
+    // Issue a DMA read/write that may span multiple virtual pages.
+    // The engine splits the request at VA page boundaries (4 KiB) and
+    // translates each chunk separately, because consecutive VAs do not
+    // necessarily map to consecutive PAs.  All sub-actions complete the
+    // same `doneEvent` after the last one finishes.
+    void issuePagedDmaAction(Packet::Command cmd, Addr vaddr, uint64_t len,
+                             EventFunctionWrapper *doneEvent, uint8_t *buf);
 };
 
 } // namespace gem5

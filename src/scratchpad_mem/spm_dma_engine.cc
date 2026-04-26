@@ -4,6 +4,8 @@
 #include "cpu/thread_context.hh"
 #include "debug/SpmDma.hh"
 #include "mem/packet_access.hh"
+#include "mem/page_table.hh"
+#include "sim/process.hh"
 #include "sim/system.hh"
 
 namespace gem5
@@ -313,24 +315,92 @@ SpmDmaEngine::startNextTransfer()
     }
 }
 
-// ---- 1D path (unchanged from original) ----
+// ---- SE-mode VA→PA translation ----
+
+Addr
+SpmDmaEngine::translateAddr(Addr vaddr)
+{
+    auto *tc = system->threads[0];
+    auto *process = tc->getProcessPtr();
+    Addr paddr;
+    if (!process->pTable->translate(vaddr, paddr))
+        panic("SpmDmaEngine: no page table entry for VA 0x%x\n", vaddr);
+    return paddr;
+}
+
+// Split a DMA action that spans multiple VA pages into one sub-action per
+// page, because gem5 SE mode allocates physical pages from a free pool and
+// consecutive VAs are not guaranteed to map to consecutive PAs.  Each
+// sub-action drives the same logical `doneEvent`; the last one to finish
+// schedules it.
+void
+SpmDmaEngine::issuePagedDmaAction(Packet::Command cmd, Addr vaddr,
+                                   uint64_t len,
+                                   EventFunctionWrapper *doneEvent,
+                                   uint8_t *buf)
+{
+    constexpr uint64_t PAGE_SIZE = 4096;
+
+    // Compute (PA, chunkLen, bufOffset) for each VA-page-bounded chunk.
+    struct Chunk { Addr pa; uint64_t bytes; uint64_t bufOff; };
+    std::vector<Chunk> chunks;
+    uint64_t off = 0;
+    while (off < len) {
+        Addr va = vaddr + off;
+        uint64_t pageEnd = (va & ~(PAGE_SIZE - 1)) + PAGE_SIZE;
+        uint64_t chunkLen = std::min(pageEnd - va, len - off);
+        chunks.push_back({translateAddr(va), chunkLen, off});
+        off += chunkLen;
+    }
+
+    // Fast path: single chunk → reuse the original event directly.
+    if (chunks.size() == 1) {
+        dmaPort.dmaAction(cmd, chunks[0].pa, chunks[0].bytes,
+                          doneEvent, buf + chunks[0].bufOff, 0);
+        return;
+    }
+
+    // Multi-chunk: each sub-action gets its own auto-deleting event that
+    // decrements a shared counter; the last sub-action schedules doneEvent.
+    int *remaining = new int(chunks.size());
+    DPRINTF(SpmDma, "VA 0x%x len=%d crosses %d pages — splitting\n",
+            vaddr, len, (int)chunks.size());
+
+    for (auto &c : chunks) {
+        auto *subEvent = new EventFunctionWrapper(
+            [this, remaining, doneEvent]() {
+                if (--(*remaining) == 0) {
+                    delete remaining;
+                    schedule(doneEvent, curTick());
+                }
+            },
+            name() + ".subDmaAction",
+            /*del=*/true);
+        dmaPort.dmaAction(cmd, c.pa, c.bytes, subEvent, buf + c.bufOff, 0);
+    }
+}
+
+// ---- 1D path ----
 
 void
 SpmDmaEngine::beginRead()
 {
-    DPRINTF(SpmDma, "beginRead: 1D, src=0x%x, %d bytes\n", curSrc, curLen);
-    dmaPort.dmaAction(MemCmd::ReadReq, curSrc, curLen,
-                      &readDoneEvent, buffer, 0);
+    DPRINTF(SpmDma, "beginRead: 1D, src VA=0x%x, %d bytes\n",
+            curSrc, curLen);
+    issuePagedDmaAction(MemCmd::ReadReq, curSrc, curLen,
+                        &readDoneEvent, buffer);
 }
 
 void
 SpmDmaEngine::readDone()
 {
-    DPRINTF(SpmDma, "readDone: 1D, writing %d bytes to dst=0x%x\n",
-            curLen, curDst);
+    DPRINTF(SpmDma, "readDone: 1D, writing %d bytes to dst VA=0x%x "
+            "first4B=0x%08x\n",
+            curLen, curDst,
+            curLen >= 4 ? *(uint32_t *)buffer : 0);
     state = Writing;
-    dmaPort.dmaAction(MemCmd::WriteReq, curDst, curLen,
-                      &writeDoneEvent, buffer, 0);
+    issuePagedDmaAction(MemCmd::WriteReq, curDst, curLen,
+                        &writeDoneEvent, buffer);
 }
 
 void
@@ -351,12 +421,14 @@ SpmDmaEngine::beginPipelinedRead()
             "%d bytes each\n", curHeight, curLen);
 
     // Issue all row reads concurrently — DmaPort queues them internally
-    // and pipelines the memory accesses.
+    // and pipelines the memory accesses.  Each row may itself span
+    // multiple VA pages, so issuePagedDmaAction further splits as needed.
     for (uint32_t r = 0; r < curHeight; r++) {
         Addr rowSrc = curSrc + (uint64_t)r * curSrcStride;
-        DPRINTF(SpmDma, "  row %d: read src=0x%x\n", r, rowSrc);
-        dmaPort.dmaAction(MemCmd::ReadReq, rowSrc, curLen,
-                          rowReadDoneEvents[r], rowBuffers[r], 0);
+        DPRINTF(SpmDma, "  row %d: read src VA=0x%x len=%d\n",
+                r, rowSrc, curLen);
+        issuePagedDmaAction(MemCmd::ReadReq, rowSrc, curLen,
+                            rowReadDoneEvents[r], rowBuffers[r]);
     }
 }
 
@@ -366,10 +438,10 @@ SpmDmaEngine::pipelinedRowReadDone(int row)
     // This row's read is complete — immediately start writing it.
     Addr rowDst = curDst + (uint64_t)row * curDstStride;
     DPRINTF(SpmDma, "pipelinedRowReadDone: row %d/%d, writing %d bytes "
-            "to dst=0x%x\n", row, curHeight, curLen, rowDst);
+            "to dst VA=0x%x\n", row, curHeight, curLen, rowDst);
 
-    dmaPort.dmaAction(MemCmd::WriteReq, rowDst, curLen,
-                      rowWriteDoneEvents[row], rowBuffers[row], 0);
+    issuePagedDmaAction(MemCmd::WriteReq, rowDst, curLen,
+                        rowWriteDoneEvents[row], rowBuffers[row]);
 }
 
 void

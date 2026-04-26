@@ -195,6 +195,16 @@ ScratchpadMemory::recvTimingReq(PacketPtr pkt, int portId)
     bool needsResponse = pkt->needsResponse();
     access(pkt);
 
+    if (addr == range.start() && size >= 4) {
+        uint32_t word;
+        if (isRead)
+            std::memcpy(&word, pkt->getPtr<uint8_t>(), 4);
+        else
+            std::memcpy(&word, pmemAddr + (addr - range.start()), 4);
+        DPRINTF(ScratchpadMem, "[port%d] DATA first4B=0x%08x (after access)\n",
+                portId, word);
+    }
+
     if (needsResponse) {
         assert(pkt->isResponse());
 

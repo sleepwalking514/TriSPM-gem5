@@ -123,8 +123,8 @@ static size_t get_spm_size() {
         return (size_t)atol(env_val);
     } else {
         // 返回默认值
-        printf("Warning: SPM_SIZE_BYTES not set, defaulting to 1MiB\n");
-        return 1024 * 1024; 
+        printf("Warning: SPM_SIZE_BYTES not set, defaulting to 256KiB\n");
+        return 256 * 1024;
     }
 }
 
