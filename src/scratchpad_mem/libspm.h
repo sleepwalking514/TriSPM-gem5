@@ -155,7 +155,8 @@ static inline void* spm_memset(void* s, int c, size_t n) {
     // 越界检查
     if ((uintptr_t)s + n > SPM_BASE + SPM_MAX_SIZE) {
         printf("[SPM Error] Out of Memory! Requested: %lu, Free: %lu\n",
-                n, SPM_BASE + SPM_MAX_SIZE - (uintptr_t)s);
+                (unsigned long)n,
+                (unsigned long)(SPM_BASE + SPM_MAX_SIZE - (uintptr_t)s));
         return NULL;
     }
 
