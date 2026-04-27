@@ -170,6 +170,10 @@ SpmDmaEngine::handleRead(PacketPtr pkt)
       case REG_SRC_STRIDE: val = stagedSrcStride;   break;
       case REG_DST_STRIDE: val = stagedDstStride;   break;
       case REG_HEIGHT:     val = stagedHeight;       break;
+      case REG_STRIDES_PACKED:
+        val = (stagedSrcStride & 0xFFFFFFFFull) |
+              ((stagedDstStride & 0xFFFFFFFFull) << 32);
+        break;
       default:
         warn("SpmDmaEngine: read from unknown offset 0x%x\n", offset);
         break;
@@ -204,9 +208,24 @@ SpmDmaEngine::handleWrite(PacketPtr pkt)
       case REG_HEIGHT:
         stagedHeight = (uint32_t)val;
         break;
-      case REG_LEN:
-        if (!startCopy(stagedSrc, stagedDst, val,
-                       stagedSrcStride, stagedDstStride, stagedHeight))
+      case REG_STRIDES_PACKED:
+        // Packed: lower 32 = SRC_STRIDE, upper 32 = DST_STRIDE.  One
+        // store updates both staged values, replacing two separate
+        // REG_SRC_STRIDE / REG_DST_STRIDE writes per descriptor.
+        stagedSrcStride = (uint64_t)(uint32_t)(val & 0xFFFFFFFFull);
+        stagedDstStride = (uint64_t)(uint32_t)((val >> 32) & 0xFFFFFFFFull);
+        break;
+      case REG_LEN: {
+        // Backward compatible LEN trigger.  Lower 32 = LEN (width).
+        // Upper 32, when non-zero, overrides stagedHeight in the same
+        // store — the compiler uses this to skip a separate REG_HEIGHT
+        // write per descriptor.  When upper 32 == 0 we honour the
+        // staged value (legacy code paths still work).
+        uint32_t width = (uint32_t)(val & 0xFFFFFFFFull);
+        uint32_t heightFromHigh = (uint32_t)((val >> 32) & 0xFFFFFFFFull);
+        uint32_t height = heightFromHigh != 0 ? heightFromHigh : stagedHeight;
+        if (!startCopy(stagedSrc, stagedDst, width,
+                       stagedSrcStride, stagedDstStride, height))
             warn("SpmDmaEngine: descriptor queue full, transfer dropped\n");
         // Reset staged 2D fields after enqueue so next 1D transfer
         // doesn't accidentally inherit them.
@@ -214,6 +233,7 @@ SpmDmaEngine::handleWrite(PacketPtr pkt)
         stagedDstStride = 0;
         stagedHeight = 1;
         break;
+      }
       default:
         warn("SpmDmaEngine: write to unknown offset 0x%x\n", offset);
         break;

@@ -276,6 +276,58 @@ static inline void spm_dma_enqueue_2d(void *dst, const void *src,
     _fence_io();
 }
 
+// -------------------- Harness helpers (input publish + cache scrub) ----------
+//
+// publish_input(): copy from a cacheable scratch to a destination buffer
+// allocated by the launcher.  When the destination falls in the
+// uncacheable DMA buffer (only present in SPM-enabled runs, signalled by
+// DMA_BUF_BASE env), the copy goes through the DMA engine in one shot.
+// Otherwise the copy degenerates to memcpy.  Either way the cost is paid
+// outside the measured ROI when called before m5_reset_stats().
+//
+// flush_caches(): walk a buffer larger than the L2 to evict the working
+// set out of both L1 and L2 (the scrub itself fills the caches with
+// uninteresting lines).  Used to give SPM and cache baselines the same
+// DRAM-cold starting state when measuring the kernel ROI.  Tune
+// SCRUB_BUFFER_BYTES if the cache hierarchy changes.
+
+#ifndef SCRUB_BUFFER_BYTES
+#define SCRUB_BUFFER_BYTES (1U << 20)   /* 1 MiB > L2 (512 KiB) */
+#endif
+#ifndef CACHE_LINE_BYTES
+#define CACHE_LINE_BYTES   64
+#endif
+
+static inline void publish_input(void *dst, const void *src, size_t nbytes)
+{
+    char *env = getenv("DMA_BUF_BASE");
+    if (env) {
+        uintptr_t base = (uintptr_t)strtoull(env, NULL, 0);
+        size_t cap = get_dma_buf_size();
+        uintptr_t d = (uintptr_t)dst;
+        if (d >= base && d < base + cap) {
+            (void)spm_dma_copy(dst, src, nbytes);
+            return;
+        }
+    }
+    memcpy(dst, src, nbytes);
+}
+
+static inline void flush_caches(void)
+{
+    static volatile uint8_t scrub[SCRUB_BUFFER_BYTES]
+        __attribute__((aligned(CACHE_LINE_BYTES)));
+    /* Touch one byte per cache line.  volatile prevents the compiler from
+     * coalescing or eliding the load-modify-store pair, so each iteration
+     * really hits the cache line. */
+    for (size_t i = 0; i < SCRUB_BUFFER_BYTES; i += CACHE_LINE_BYTES) {
+        scrub[i] = (uint8_t)(scrub[i] + 1);
+    }
+    /* Drain the store buffer so the eviction writebacks land in DRAM
+     * before the caller proceeds (e.g. before m5_reset_stats). */
+    asm volatile("fence rw, rw" ::: "memory");
+}
+
 // -------------------- gem5 m5ops pseudo-instructions (RISC-V) ------
 // Encoding: .word 0x0000007b | (func << 25)
 // See util/m5/src/abi/riscv/m5op.S

@@ -104,13 +104,22 @@ class SpmDmaEngine : public ClockedObject
         uint32_t height;    // 2D: number of rows (0 or 1 = 1D mode)
     };
 
-    static constexpr Addr REG_SRC        = 0x00;
-    static constexpr Addr REG_DST        = 0x08;
-    static constexpr Addr REG_LEN        = 0x10;
-    static constexpr Addr REG_STATUS     = 0x18;
-    static constexpr Addr REG_SRC_STRIDE = 0x20;
-    static constexpr Addr REG_DST_STRIDE = 0x28;
-    static constexpr Addr REG_HEIGHT     = 0x30;
+    static constexpr Addr REG_SRC            = 0x00;
+    static constexpr Addr REG_DST            = 0x08;
+    // REG_LEN: writing triggers enqueue.  Lower 32 bits are LEN (bytes per
+    // row in 2D mode, total bytes in 1D mode).  Upper 32 bits, when non-
+    // zero, override the staged HEIGHT in one store — letting the
+    // compiler skip a separate REG_HEIGHT write per descriptor.
+    static constexpr Addr REG_LEN            = 0x10;
+    static constexpr Addr REG_STATUS         = 0x18;
+    static constexpr Addr REG_SRC_STRIDE     = 0x20;
+    static constexpr Addr REG_DST_STRIDE     = 0x28;
+    static constexpr Addr REG_HEIGHT         = 0x30;
+    // REG_STRIDES_PACKED: lower 32 = SRC_STRIDE, upper 32 = DST_STRIDE.
+    // Lets the compiler set both row pitches in one MMIO store, halving
+    // the descriptor traffic for 2D enqueues.  Legacy REG_SRC_STRIDE /
+    // REG_DST_STRIDE remain functional for hand-written code.
+    static constexpr Addr REG_STRIDES_PACKED = 0x38;
 
     enum State { Idle, Reading, Writing };
 
