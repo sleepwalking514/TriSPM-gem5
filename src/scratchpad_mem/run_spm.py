@@ -48,8 +48,17 @@ class MMUCache(Cache):
 
 
 class SPMSystem(System):
-    def __init__(self, binary, enable_spm, spm_size, spm_latency, spm_bw,
-                 spm_num_banks, spm_intlv):
+    def __init__(
+        self,
+        binary,
+        enable_spm,
+        spm_size,
+        spm_latency,
+        spm_bw,
+        spm_num_banks,
+        spm_intlv,
+        dma_max_descriptors=4,
+    ):
         super().__init__()
 
         self.clk_domain = SrcClockDomain(
@@ -128,6 +137,7 @@ class SPMSystem(System):
                 pio_addr=self._dma_base_addr,
                 pio_size=0x40,
                 pio_latency="1ns",
+                max_descriptors=dma_max_descriptors,
             )
             self.spm_dma.pio = self.l2bus.mem_side_ports
             self.spm_dma.dma = self.l2bus.cpu_side_ports
@@ -135,8 +145,9 @@ class SPMSystem(System):
             # ---------- Uncacheable bridge (DMA buffer → DRAM) ----------
             self.uc_bridge = Bridge(
                 ranges=[
-                    AddrRange(start=self._dma_buf_base,
-                              size=self._dma_buf_size)
+                    AddrRange(
+                        start=self._dma_buf_base, size=self._dma_buf_size
+                    )
                 ],
                 delay="1ns",
                 req_size=64,
@@ -174,25 +185,31 @@ class SPMSystem(System):
         serialise SPM accesses despite the uncacheable flag.
         DMA MMIO and DMA buffer remain strictly ordered (correct).
         """
-        print(f"Mapping SPM (uncacheable): "
-              f"0x{self._spm_start_addr:x} size: {self._spm_size_val}")
+        print(
+            f"Mapping SPM (uncacheable): "
+            f"0x{self._spm_start_addr:x} size: {self._spm_size_val}"
+        )
         self.process.map(
-            self._spm_start_addr, self._spm_start_addr,
-            self._spm_size_val, False
+            self._spm_start_addr,
+            self._spm_start_addr,
+            self._spm_size_val,
+            False,
         )
 
-        print(f"Mapping DMA MMIO (uncacheable): "
-              f"0x{self._dma_base_addr:x} size: {self._dma_size}")
+        print(
+            f"Mapping DMA MMIO (uncacheable): "
+            f"0x{self._dma_base_addr:x} size: {self._dma_size}"
+        )
         self.process.map(
-            self._dma_base_addr, self._dma_base_addr,
-            self._dma_size, False
+            self._dma_base_addr, self._dma_base_addr, self._dma_size, False
         )
 
-        print(f"Mapping DMA BUF (uncacheable): "
-              f"0x{self._dma_buf_base:x} size: {self._dma_buf_size}")
+        print(
+            f"Mapping DMA BUF (uncacheable): "
+            f"0x{self._dma_buf_base:x} size: {self._dma_buf_size}"
+        )
         self.process.map(
-            self._dma_buf_base, self._dma_buf_base,
-            self._dma_buf_size, False
+            self._dma_buf_base, self._dma_buf_base, self._dma_buf_size, False
         )
 
     @staticmethod
@@ -200,25 +217,37 @@ class SPMSystem(System):
         if isinstance(size_str, int):
             return size_str
         units = {
-            "KiB": 1024, "MiB": 1024**2, "GiB": 1024**3,
-            "kB": 1000, "MB": 1000**2,
+            "KiB": 1024,
+            "MiB": 1024**2,
+            "GiB": 1024**3,
+            "kB": 1000,
+            "MB": 1000**2,
         }
         for unit, mul in units.items():
             if size_str.endswith(unit):
-                return int(size_str[:-len(unit)]) * mul
+                return int(size_str[: -len(unit)]) * mul
         return int(size_str)
 
 
 if __name__ == "__m5_main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=str, required=True)
-    parser.add_argument("--cache_baseline", action="store_true",
-                        help="Pure cache architecture (no SPM)")
+    parser.add_argument(
+        "--cache_baseline",
+        action="store_true",
+        help="Pure cache architecture (no SPM)",
+    )
     parser.add_argument("--spm_size", type=str, default="256KiB")
     parser.add_argument("--spm_lat", type=str, default="1ns")
     parser.add_argument("--spm_bw", type=str, default="64GiB/s")
     parser.add_argument("--spm_num_banks", type=int, default=16)
     parser.add_argument("--spm_intlv", type=int, default=64)
+    parser.add_argument(
+        "--dma_max_descriptors",
+        type=int,
+        default=4,
+        help="Maximum queued DMA descriptors",
+    )
     parser.add_argument("--max-tick", type=int, default=0)
     args = parser.parse_args()
 
@@ -231,6 +260,7 @@ if __name__ == "__m5_main__":
         spm_bw=args.spm_bw,
         spm_num_banks=args.spm_num_banks,
         spm_intlv=args.spm_intlv,
+        dma_max_descriptors=args.dma_max_descriptors,
     )
 
     print("Instantiating...")

@@ -117,7 +117,7 @@ static unsigned long _spm_current_offset = 0x0;
 static size_t get_spm_size() {
     // 获取环境变量字符串
     char* env_val = getenv("SPM_SIZE_BYTES");
-    
+
     if (env_val != NULL) {
         // 转成整数
         return (size_t)atol(env_val);
@@ -133,8 +133,8 @@ static inline void* spm_malloc(size_t size) {
     size_t SPM_MAX_SIZE = get_spm_size();
     // 越界检查
     if (_spm_current_offset + size > SPM_MAX_SIZE) {
-        printf("[SPM Error] Out of memory! Requested: %lu, Free: %lu\n", 
-               size, SPM_MAX_SIZE - _spm_current_offset);
+        printf("[SPM Error] Out of memory! Requested: %lu, Free: %lu\n", size,
+               SPM_MAX_SIZE - _spm_current_offset);
         return NULL;
     }
 
@@ -178,14 +178,14 @@ static inline uintptr_t get_dma_buf_base(void) {
     char *env = getenv("DMA_BUF_BASE");
     if (env) return (uintptr_t)strtoull(env, NULL, 0);
     // fallback：和 run_spm.py 默认一致
-    return (uintptr_t)0x30000000ULL;
+    return (uintptr_t)0x20000000ULL;
 }
 
 static inline size_t get_dma_buf_size(void) {
     char *env = getenv("DMA_BUF_SIZE");
     if (env) return (size_t)strtoull(env, NULL, 0);
-    // fallback：1MiB
-    return (size_t)(1024 * 1024);
+    // fallback：512MiB
+    return (size_t)(512ULL * 1024ULL * 1024ULL);
 }
 
 static inline void* dma_buf_malloc(size_t size) {
