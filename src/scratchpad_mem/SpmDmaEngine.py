@@ -17,5 +17,5 @@ class SpmDmaEngine(ClockedObject):
     pio_latency = Param.Latency('1ns', 'Latency for PIO register access')
     desc_latency = Param.Latency('1ns',
         'Per-descriptor decode/setup latency before DMA begins')
-    max_descriptors = Param.Unsigned(4,
+    max_descriptors = Param.Unsigned(32,
         'Maximum number of queued DMA descriptors')

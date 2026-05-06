@@ -57,7 +57,7 @@ class SPMSystem(System):
         spm_bw,
         spm_num_banks,
         spm_intlv,
-        dma_max_descriptors=4,
+        dma_max_descriptors=32,
     ):
         super().__init__()
 
@@ -245,7 +245,7 @@ if __name__ == "__m5_main__":
     parser.add_argument(
         "--dma_max_descriptors",
         type=int,
-        default=4,
+        default=32,
         help="Maximum queued DMA descriptors",
     )
     parser.add_argument("--max-tick", type=int, default=0)
