@@ -29,7 +29,7 @@ extern "C" {
 
 
 // -------------------- SpmDmaEngine register offsets --------------------------
-// 7-register MMIO interface with descriptor queue (default depth: 4).
+// 7-register MMIO interface with descriptor queue (default depth: 32).
 //
 // 1D transfer: Write SRC, DST, then LEN (writing LEN enqueues).
 // 2D transfer: Write SRC, DST, SRC_STRIDE, DST_STRIDE, HEIGHT, then LEN.
@@ -366,7 +366,7 @@ static inline void m5_dump_stats(uint64_t ns_delay, uint64_t ns_period)
 //   spm.dma.w       x_status                      // poll for completion
 //
 // Transfers are bidirectional: src/dst can be any mapped address (SPM or DRAM).
-// The DMA engine has a descriptor queue (default 4 entries); spm.dma enqueues
+// The DMA engine has a descriptor queue (default 32 entries); spm.dma enqueues
 // a transfer, spm.dma.w blocks until all queued transfers complete.
 // Requires gem5 built with the Xspm decoder patch.
 

@@ -34,7 +34,7 @@ namespace gem5
  * starts writing each row as soon as its read completes, fully
  * pipelining read/write across rows for maximum throughput.
  *
- * The descriptor queue allows multiple transfers to be queued (default 4),
+ * The descriptor queue allows multiple transfers to be queued (default 32),
  * enabling the compiler to overlap DMA load/store with computation
  * (e.g., double-buffered tiling without pipeline stalls between submit).
  *
