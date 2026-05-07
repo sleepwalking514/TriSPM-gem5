@@ -27,9 +27,9 @@ extern "C" {
 
 #define DMA_MMIO_BASE    0xF0000000ULL
 
-
-// -------------------- SpmDmaEngine register offsets --------------------------
-// 7-register MMIO interface with descriptor queue (default depth: 32).
+// -------------------- SpmDmaEngine register offsets
+// -------------------------- 7-register MMIO interface with descriptor queue
+// (default depth: 32).
 //
 // 1D transfer: Write SRC, DST, then LEN (writing LEN enqueues).
 // 2D transfer: Write SRC, DST, SRC_STRIDE, DST_STRIDE, HEIGHT, then LEN.
@@ -356,18 +356,20 @@ static inline void m5_dump_stats(uint64_t ns_delay, uint64_t ns_period)
 // -------------------- Xspm custom instructions (alternative to MMIO) ------
 // Uses custom-0 opcode (0x0B) with:
 //   spm.dma        rd, rs1, rs2   funct3=0  R-type  (rd=dst, rs1=src, rs2=len)
-//   spm.dma.w      rd             funct3=1  I-type  (wait for all DMA completion)
-//   spm.dma.stride rs1, rs2       funct3=2  R-type  (rs1=src_stride, rs2=dst_stride)
-//   spm.dma.2d     rd, rs1, rs2   funct3=3  R-type  (rd=dst, rs1=src, rs2=width|height)
+//   spm.dma.w      rd             funct3=1  I-type  (wait for all DMA
+//   completion) spm.dma.stride rs1, rs2       funct3=2  R-type
+//   (rs1=src_stride, rs2=dst_stride) spm.dma.2d     rd, rs1, rs2   funct3=3
+//   R-type  (rd=dst, rs1=src, rs2=width|height)
 //
 // 2D usage sequence:
 //   spm.dma.stride  x_src_stride, x_dst_stride   // stage strides
-//   spm.dma.2d      x_dst, x_src, x_wh           // enqueue (width=low32, height=high32)
-//   spm.dma.w       x_status                      // poll for completion
+//   spm.dma.2d      x_dst, x_src, x_wh           // enqueue (width=low32,
+//   height=high32) spm.dma.w       x_status                      // poll for
+//   completion
 //
-// Transfers are bidirectional: src/dst can be any mapped address (SPM or DRAM).
-// The DMA engine has a descriptor queue (default 32 entries); spm.dma enqueues
-// a transfer, spm.dma.w blocks until all queued transfers complete.
+// Transfers are bidirectional: src/dst can be any mapped address (SPM or
+// DRAM). The DMA engine has a descriptor queue (default 32 entries); spm.dma
+// enqueues a transfer, spm.dma.w blocks until all queued transfers complete.
 // Requires gem5 built with the Xspm decoder patch.
 
 #ifdef USE_XSPM_INSN
