@@ -52,6 +52,8 @@ class SPMSystem(System):
         self,
         binary,
         enable_spm,
+        l1d_size,
+        l2_size,
         spm_size,
         spm_latency,
         spm_bw,
@@ -90,10 +92,10 @@ class SPMSystem(System):
 
         # ===================== Cache hierarchy =====================
         self.l2bus = L2XBar()
-        self.l2cache = L2Cache(addr_ranges=valid_cache_ranges)
+        self.l2cache = L2Cache(size=l2_size, addr_ranges=valid_cache_ranges)
 
         self.l1i = L1ICache(addr_ranges=valid_cache_ranges)
-        self.l1d = L1DCache(addr_ranges=valid_cache_ranges)
+        self.l1d = L1DCache(size=l1d_size, addr_ranges=valid_cache_ranges)
 
         self.iptw_cache = MMUCache(addr_ranges=valid_cache_ranges)
         self.dptw_cache = MMUCache(addr_ranges=valid_cache_ranges)
@@ -237,6 +239,22 @@ if __name__ == "__m5_main__":
         action="store_true",
         help="Pure cache architecture (no SPM)",
     )
+    parser.add_argument(
+        "--l1d_size",
+        "--l1d-size",
+        dest="l1d_size",
+        type=str,
+        default="32KiB",
+        help="L1 data cache size for both cache-only and SPM systems",
+    )
+    parser.add_argument(
+        "--l2_size",
+        "--l2-size",
+        dest="l2_size",
+        type=str,
+        default="512KiB",
+        help="L2 cache size for both cache-only and SPM systems",
+    )
     parser.add_argument("--spm_size", type=str, default="256KiB")
     parser.add_argument("--spm_lat", type=str, default="1ns")
     parser.add_argument("--spm_bw", type=str, default="64GiB/s")
@@ -255,6 +273,8 @@ if __name__ == "__m5_main__":
     root.system = SPMSystem(
         binary=args.binary,
         enable_spm=not args.cache_baseline,
+        l1d_size=args.l1d_size,
+        l2_size=args.l2_size,
         spm_size=args.spm_size,
         spm_latency=args.spm_lat,
         spm_bw=args.spm_bw,
