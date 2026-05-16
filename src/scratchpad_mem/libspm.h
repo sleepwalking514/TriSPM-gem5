@@ -5,11 +5,12 @@
 // Assumes:
 //   - SPM is mapped at SPM_BASE (address routing bypasses cache)
 //   - SpmDmaEngine MMIO is mapped at DMA_MMIO_BASE
+//   - ordinary DRAM is cacheable by default
 //   - gem5 SE mode: no real OS / IOMMU. Addresses are treated as physical.
 //
-// Two DMA paths:
-//   1) MMIO: spm_dma_copy() using standard ld/sd to program SpmDmaEngine registers
-//   2) Custom ISA: xspm_dma() / xspm_dma_wait() using spm.dma / spm.dma.w instructions
+// DMA APIs:
+//   - spm_dma_copy() uses MMIO register writes.
+//   - xspm_dma() / xspm_dma_wait() use Xspm custom instructions.
 
 #include <stddef.h>
 #include <stdio.h>
@@ -177,20 +178,25 @@ static unsigned long _dma_buf_current_offset = 0x0;
 static inline uintptr_t get_dma_buf_base(void) {
     char *env = getenv("DMA_BUF_BASE");
     if (env) return (uintptr_t)strtoull(env, NULL, 0);
-    // fallback：和 run_spm.py 默认一致
-    return (uintptr_t)0x20000000ULL;
+    return 0;
 }
 
 static inline size_t get_dma_buf_size(void) {
     char *env = getenv("DMA_BUF_SIZE");
     if (env) return (size_t)strtoull(env, NULL, 0);
-    // fallback：512MiB
-    return (size_t)(512ULL * 1024ULL * 1024ULL);
+    return 0;
 }
 
 static inline void* dma_buf_malloc(size_t size) {
     uintptr_t base = get_dma_buf_base();
     size_t    cap  = get_dma_buf_size();
+
+    if (base == 0 || cap == 0) {
+        printf("[DMA_BUF Error] legacy uncacheable DMA buffer is disabled. "
+               "Run gem5 with --legacy-uncacheable-dma-buf to use "
+               "dma_buf_malloc().\n");
+        return NULL;
+    }
 
     // 8B 对齐
     size_t aligned_size = (size + 7) & ~((size_t)7);
@@ -276,14 +282,14 @@ static inline void spm_dma_enqueue_2d(void *dst, const void *src,
     _fence_io();
 }
 
-// -------------------- Harness helpers (input publish + cache scrub) ----------
+// -------------------- Harness helpers --------------------
 //
 // publish_input(): copy from a cacheable scratch to a destination buffer
-// allocated by the launcher.  When the destination falls in the
-// uncacheable DMA buffer (only present in SPM-enabled runs, signalled by
-// DMA_BUF_BASE env), the copy goes through the DMA engine in one shot.
-// Otherwise the copy degenerates to memcpy.  Either way the cost is paid
-// outside the measured ROI when called before m5_reset_stats().
+// allocated by the launcher.  Default SPM runs use normal cacheable DRAM, so
+// this is a memcpy.  Legacy Tier-3 runs may enable DMA_BUF_BASE; in that case
+// destinations inside the legacy uncacheable DMA buffer are populated via DMA.
+// Either way the cost is paid outside the measured ROI when called before
+// m5_reset_stats().
 //
 // flush_caches(): walk a buffer larger than the L2 to evict the working
 // set out of both L1 and L2 (the scrub itself fills the caches with
@@ -305,7 +311,7 @@ static inline void publish_input(void *dst, const void *src, size_t nbytes)
         uintptr_t base = (uintptr_t)strtoull(env, NULL, 0);
         size_t cap = get_dma_buf_size();
         uintptr_t d = (uintptr_t)dst;
-        if (d >= base && d < base + cap) {
+        if (cap != 0 && d >= base && d < base + cap) {
             (void)spm_dma_copy(dst, src, nbytes);
             return;
         }
