@@ -217,16 +217,23 @@ static inline void dma_buf_free_all(void) {
     _dma_buf_current_offset = 0x0;
 }
 
-static inline int spm_dma_wait(void)
+static inline int
+spm_dma_wait_count(uint64_t max_pending)
 {
     const uint64_t max_iters = 20000000ULL;
     for (uint64_t it = 0; it < max_iters; ++it) {
-        if (dma_read64(DMA_REG_STATUS) == 0) {
+        if (dma_read64(DMA_REG_STATUS) <= max_pending) {
             _fence_io();
             return 0;
         }
     }
     return -1;
+}
+
+static inline int
+spm_dma_wait(void)
+{
+    return spm_dma_wait_count(0);
 }
 
 static inline int spm_dma_copy(void *dst, const void *src, size_t nbytes)
@@ -362,20 +369,20 @@ static inline void m5_dump_stats(uint64_t ns_delay, uint64_t ns_period)
 // -------------------- Xspm custom instructions (alternative to MMIO) ------
 // Uses custom-0 opcode (0x0B) with:
 //   spm.dma        rd, rs1, rs2   funct3=0  R-type  (rd=dst, rs1=src, rs2=len)
-//   spm.dma.w      rd             funct3=1  I-type  (wait for all DMA
-//   completion) spm.dma.stride rs1, rs2       funct3=2  R-type
+//   spm.dma.w      rd             funct3=1  I-type  (read pending DMA count)
+//   spm.dma.stride rs1, rs2       funct3=2  R-type
 //   (rs1=src_stride, rs2=dst_stride) spm.dma.2d     rd, rs1, rs2   funct3=3
 //   R-type  (rd=dst, rs1=src, rs2=width|height)
 //
 // 2D usage sequence:
 //   spm.dma.stride  x_src_stride, x_dst_stride   // stage strides
-//   spm.dma.2d      x_dst, x_src, x_wh           // enqueue (width=low32,
-//   height=high32) spm.dma.w       x_status                      // poll for
-//   completion
+//   spm.dma.2d      x_dst, x_src, x_wh           // enqueue
+//   spm.dma.w       x_status                     // read pending count
+//   (x_wh packs width=low32, height=high32)
 //
 // Transfers are bidirectional: src/dst can be any mapped address (SPM or
 // DRAM). The DMA engine has a descriptor queue (default 32 entries); spm.dma
-// enqueues a transfer, spm.dma.w blocks until all queued transfers complete.
+// enqueues a transfer, and spm.dma.w returns queued+active descriptor count.
 // Requires gem5 built with the Xspm decoder patch.
 
 #ifdef USE_XSPM_INSN
@@ -387,14 +394,21 @@ static inline void xspm_dma(uintptr_t spm_dst, uintptr_t dram_src,
                  : : "r"(spm_dst), "r"(dram_src), "r"(nbytes) : "memory");
 }
 
-static inline void xspm_dma_wait(void)
+static inline void
+xspm_dma_wait_count(uint64_t max_pending)
 {
     uint64_t pending;
     do {
         asm volatile(".insn i 0x0B, 1, %0, x0, 0"
                      : "=r"(pending) : : "memory");
-    } while (pending != 0);
+    } while (pending > max_pending);
     _fence_io();
+}
+
+static inline void
+xspm_dma_wait(void)
+{
+    xspm_dma_wait_count(0);
 }
 
 // Stage source and destination strides for the next spm.dma.2d.
