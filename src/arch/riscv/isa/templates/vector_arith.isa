@@ -1737,7 +1737,10 @@ template<typename ElemType>
     for (int i = 0; i < num_microops && micro_vl > 0; ++i) {
         microop = new %(class_name)sMicro<ElemType>(_machInst, micro_vl, i,
                                                     _elen, _vlen);
-        if (flags[IsSerializeAfter] && i < num_microops-1) { // ordered
+        if (i < num_microops-1) {
+            // The reduction micro-op implementation carries the partial
+            // accumulator through Vd[0].  Serialize the generated micro-ops so
+            // O3 cannot observe that hidden dependence out of order.
             microop->setFlag(StaticInst::IsSerializeAfter);
         }
         microop->setDelayedCommit();

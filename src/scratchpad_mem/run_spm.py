@@ -59,6 +59,11 @@ class SPMSystem(System):
         spm_bw,
         spm_num_banks,
         spm_intlv,
+        dma_pio_latency,
+        dma_desc_latency,
+        dram_type,
+        system_xbar_width,
+        l2_xbar_width,
         dma_max_descriptors=32,
         legacy_uncacheable_dma_buf=False,
     ):
@@ -73,7 +78,7 @@ class SPMSystem(System):
         self.cpu = O3CPU()
         self.cpu.createInterruptController()
 
-        self.membus = SystemXBar()
+        self.membus = SystemXBar(width=system_xbar_width)
 
         self._legacy_uncacheable_dma_buf = legacy_uncacheable_dma_buf
 
@@ -94,7 +99,7 @@ class SPMSystem(System):
             valid_cache_ranges = [AddrRange("1GiB")]
 
         # ===================== Cache hierarchy =====================
-        self.l2bus = L2XBar()
+        self.l2bus = L2XBar(width=l2_xbar_width)
         self.l2cache = L2Cache(size=l2_size, addr_ranges=valid_cache_ranges)
 
         self.l1i = L1ICache(addr_ranges=valid_cache_ranges)
@@ -129,7 +134,7 @@ class SPMSystem(System):
                 bank_interleave_size=spm_intlv,
             )
 
-            # CPU spm_port → SPM cpu_port  (direct, 1-cycle)
+            # CPU spm_port → SPM cpu_port (direct, configured SPM latency)
             self.cpu.spm_port = self.spm.cpu_port
             self.cpu.spmAddrStart = self._spm_start_addr
             self.cpu.spmAddrSize = self._spm_size_val
@@ -141,7 +146,8 @@ class SPMSystem(System):
             self.spm_dma = SpmDmaEngine(
                 pio_addr=self._dma_base_addr,
                 pio_size=0x40,
-                pio_latency="1ns",
+                pio_latency=dma_pio_latency,
+                desc_latency=dma_desc_latency,
                 max_descriptors=dma_max_descriptors,
             )
             self.spm_dma.pio = self.l2bus.mem_side_ports
@@ -165,7 +171,11 @@ class SPMSystem(System):
 
         # ===================== DRAM =====================
         self.mem_ctrl = MemCtrl()
-        self.mem_ctrl.dram = DDR3_1600_8x8()
+        try:
+            dram_cls = globals()[dram_type]
+        except KeyError as exc:
+            raise ValueError(f"Unknown DRAM type: {dram_type}") from exc
+        self.mem_ctrl.dram = dram_cls()
         self.mem_ctrl.dram.range = self.mem_ranges[0]
         self.mem_ctrl.port = self.membus.mem_side_ports
 
@@ -269,10 +279,15 @@ if __name__ == "__m5_main__":
         help="L2 cache size for both cache-only and SPM systems",
     )
     parser.add_argument("--spm_size", type=str, default="256KiB")
-    parser.add_argument("--spm_lat", type=str, default="1ns")
+    parser.add_argument("--spm_lat", type=str, default="2ns")
     parser.add_argument("--spm_bw", type=str, default="64GiB/s")
     parser.add_argument("--spm_num_banks", type=int, default=16)
     parser.add_argument("--spm_intlv", type=int, default=64)
+    parser.add_argument("--dma_pio_lat", type=str, default="5ns")
+    parser.add_argument("--dma_desc_lat", type=str, default="10ns")
+    parser.add_argument("--dram_type", type=str, default="DDR5_6400_4x8")
+    parser.add_argument("--system_xbar_width", type=int, default=32)
+    parser.add_argument("--l2_xbar_width", type=int, default=32)
     parser.add_argument(
         "--dma_max_descriptors",
         type=int,
@@ -301,6 +316,11 @@ if __name__ == "__m5_main__":
         spm_bw=args.spm_bw,
         spm_num_banks=args.spm_num_banks,
         spm_intlv=args.spm_intlv,
+        dma_pio_latency=args.dma_pio_lat,
+        dma_desc_latency=args.dma_desc_lat,
+        dram_type=args.dram_type,
+        system_xbar_width=args.system_xbar_width,
+        l2_xbar_width=args.l2_xbar_width,
         dma_max_descriptors=args.dma_max_descriptors,
         legacy_uncacheable_dma_buf=args.legacy_uncacheable_dma_buf,
     )

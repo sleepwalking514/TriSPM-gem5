@@ -347,6 +347,7 @@ static inline void flush_caches(void)
 
 #define M5OP_RESET_STATS  0x40
 #define M5OP_DUMP_STATS   0x41
+#define M5OP_DUMP_RESET_STATS 0x42
 
 static inline void m5_reset_stats(uint64_t ns_delay, uint64_t ns_period)
 {
@@ -363,6 +364,15 @@ static inline void m5_dump_stats(uint64_t ns_delay, uint64_t ns_period)
     register uint64_t _a1 asm("a1") = ns_period;
     asm volatile(".word %[op]"
                  : : [op] "i"(0x0000007b | (M5OP_DUMP_STATS << 25)),
+                     "r"(_a0), "r"(_a1) : "memory");
+}
+
+static inline void m5_dump_reset_stats(uint64_t ns_delay, uint64_t ns_period)
+{
+    register uint64_t _a0 asm("a0") = ns_delay;
+    register uint64_t _a1 asm("a1") = ns_period;
+    asm volatile(".word %[op]"
+                 : : [op] "i"(0x0000007b | (M5OP_DUMP_RESET_STATS << 25)),
                      "r"(_a0), "r"(_a1) : "memory");
 }
 
