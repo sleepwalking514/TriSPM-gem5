@@ -57,6 +57,7 @@ class SPMSystem(System):
         spm_size,
         spm_latency,
         spm_bw,
+        spm_single_port,
         spm_num_banks,
         spm_intlv,
         dma_pio_latency,
@@ -65,7 +66,6 @@ class SPMSystem(System):
         system_xbar_width,
         l2_xbar_width,
         dma_max_descriptors=32,
-        legacy_uncacheable_dma_buf=False,
     ):
         super().__init__()
 
@@ -79,8 +79,7 @@ class SPMSystem(System):
         self.cpu.createInterruptController()
 
         self.membus = SystemXBar(width=system_xbar_width)
-
-        self._legacy_uncacheable_dma_buf = legacy_uncacheable_dma_buf
+        valid_cache_ranges = [AddrRange("1GiB")]
 
         if enable_spm:
             self._dma_base_addr = 0xF0000000
@@ -88,15 +87,6 @@ class SPMSystem(System):
 
             self._spm_start_addr = 0x40000000
             self._spm_size_val = self._parse_size(spm_size)
-
-            valid_cache_ranges = [AddrRange("1GiB")]
-            if self._legacy_uncacheable_dma_buf:
-                valid_cache_ranges = [AddrRange("512MiB")]
-                self._dma_buf_size = self._parse_size("512MiB")
-                self._dma_buf_base = self._spm_start_addr - self._dma_buf_size
-                assert self._spm_size_val <= self._dma_buf_size
-        else:
-            valid_cache_ranges = [AddrRange("1GiB")]
 
         # ===================== Cache hierarchy =====================
         self.l2bus = L2XBar(width=l2_xbar_width)
@@ -130,6 +120,7 @@ class SPMSystem(System):
                 range=AddrRange(start=self._spm_start_addr, size=spm_size),
                 latency=spm_latency,
                 bandwidth=spm_bw,
+                single_port=spm_single_port,
                 num_banks=spm_num_banks,
                 bank_interleave_size=spm_intlv,
             )
@@ -153,22 +144,6 @@ class SPMSystem(System):
             self.spm_dma.pio = self.l2bus.mem_side_ports
             self.spm_dma.dma = self.l2bus.cpu_side_ports
 
-            if self._legacy_uncacheable_dma_buf:
-                # Legacy Tier-3 backing: a noncacheable DRAM window used only
-                # when explicitly requested for old ablations/debugging.
-                self.uc_bridge = Bridge(
-                    ranges=[
-                        AddrRange(
-                            start=self._dma_buf_base, size=self._dma_buf_size
-                        )
-                    ],
-                    delay="1ns",
-                    req_size=64,
-                    resp_size=64,
-                )
-                self.uc_bridge.mem_side_port = self.membus.cpu_side_ports
-                self.l2bus.mem_side_ports = self.uc_bridge.cpu_side_port
-
         # ===================== DRAM =====================
         self.mem_ctrl = MemCtrl()
         try:
@@ -187,11 +162,6 @@ class SPMSystem(System):
             self.process.env = [
                 f"SPM_SIZE_BYTES={self._parse_size(spm_size)}",
             ]
-            if self._legacy_uncacheable_dma_buf:
-                self.process.env += [
-                    f"DMA_BUF_BASE=0x{self._dma_buf_base:x}",
-                    f"DMA_BUF_SIZE={self._dma_buf_size}",
-                ]
         self.workload = SEWorkload.init_compatible(binary)
         self.cpu.workload = self.process
         self.cpu.createThreads()
@@ -203,8 +173,7 @@ class SPMSystem(System):
         The LSQ override clears strictlyOrdered for SPM addresses
         and routes them to spm_port, so the O3 pipeline does NOT
         serialise SPM accesses despite the uncacheable flag.
-        DMA MMIO remains strictly ordered.  The legacy DMA buffer is mapped
-        only when --legacy-uncacheable-dma-buf is requested.
+        DMA MMIO remains strictly ordered.  Ordinary DRAM stays cacheable.
         """
         print(
             f"Mapping SPM (uncacheable): "
@@ -224,18 +193,6 @@ class SPMSystem(System):
         self.process.map(
             self._dma_base_addr, self._dma_base_addr, self._dma_size, False
         )
-
-        if self._legacy_uncacheable_dma_buf:
-            print(
-                f"Mapping legacy DMA BUF (uncacheable): "
-                f"0x{self._dma_buf_base:x} size: {self._dma_buf_size}"
-            )
-            self.process.map(
-                self._dma_buf_base,
-                self._dma_buf_base,
-                self._dma_buf_size,
-                False,
-            )
 
     @staticmethod
     def _parse_size(size_str):
@@ -278,9 +235,14 @@ if __name__ == "__m5_main__":
         default="512KiB",
         help="L2 cache size for both cache-only and SPM systems",
     )
-    parser.add_argument("--spm_size", type=str, default="256KiB")
+    parser.add_argument("--spm_size", type=str, default="32KiB")
     parser.add_argument("--spm_lat", type=str, default="2ns")
-    parser.add_argument("--spm_bw", type=str, default="64GiB/s")
+    parser.add_argument("--spm_bw", type=str, default="32GiB/s")
+    parser.add_argument(
+        "--spm_single_port",
+        action="store_true",
+        help="Model CPU and DMA SPM accesses sharing one internal SRAM port",
+    )
     parser.add_argument("--spm_num_banks", type=int, default=16)
     parser.add_argument("--spm_intlv", type=int, default=64)
     parser.add_argument("--dma_pio_lat", type=str, default="5ns")
@@ -294,14 +256,6 @@ if __name__ == "__m5_main__":
         default=32,
         help="Maximum queued DMA descriptors",
     )
-    parser.add_argument(
-        "--legacy-uncacheable-dma-buf",
-        action="store_true",
-        help=(
-            "Enable the old Tier-3 uncacheable DRAM buffer. "
-            "Default SPM runs use normal cacheable DRAM."
-        ),
-    )
     parser.add_argument("--max-tick", type=int, default=0)
     args = parser.parse_args()
 
@@ -314,6 +268,7 @@ if __name__ == "__m5_main__":
         spm_size=args.spm_size,
         spm_latency=args.spm_lat,
         spm_bw=args.spm_bw,
+        spm_single_port=args.spm_single_port,
         spm_num_banks=args.spm_num_banks,
         spm_intlv=args.spm_intlv,
         dma_pio_latency=args.dma_pio_lat,
@@ -322,7 +277,6 @@ if __name__ == "__m5_main__":
         system_xbar_width=args.system_xbar_width,
         l2_xbar_width=args.l2_xbar_width,
         dma_max_descriptors=args.dma_max_descriptors,
-        legacy_uncacheable_dma_buf=args.legacy_uncacheable_dma_buf,
     )
 
     print("Instantiating...")

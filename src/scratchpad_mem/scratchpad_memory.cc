@@ -20,15 +20,17 @@ ScratchpadMemory::ScratchpadMemory(const ScratchpadMemoryParams &p)
       latency(p.latency),
       latencyVar(p.latency_var),
       bandwidth(p.bandwidth),
+      singlePort(p.single_port),
       numBanks(p.num_banks),
       bankIntlvSize(p.bank_interleave_size),
       bankBusyUntil(p.num_banks, std::array<Tick, NUM_PORTS>{{0, 0}}),
+      sharedPortBusyUntil(0),
       isBusy_{false, false},
       retryReq_{false, false},
       retryResp_{false, false},
-      busReleaseEvent([this]{ release(PORT_BUS); }, name()),
-      cpuReleaseEvent([this]{ release(PORT_CPU); }, name()),
-      dequeueEvent([this]{ dequeue(); }, name()),
+      busReleaseEvent([this] { release(PORT_BUS); }, name()),
+      cpuReleaseEvent([this] { release(PORT_CPU); }, name()),
+      dequeueEvent([this] { dequeue(); }, name()),
       spmStats(*this)
 {
     panic_if(numBanks == 0, "num_banks must be > 0");
@@ -47,9 +49,11 @@ ScratchpadMemory::init()
     if (cpuPort.isConnected())
         cpuPort.sendRangeChange();
 
-    DPRINTF(ScratchpadMem, "Initialized (dual-port): %d banks, %d-byte interleave, "
+    DPRINTF(ScratchpadMem,
+            "Initialized (%s): %d banks, %d-byte interleave, "
             "%d tick base latency, size=%#x\n",
-            numBanks, bankIntlvSize, latency, range.size());
+            singlePort ? "single-port" : "dual-port", numBanks, bankIntlvSize,
+            latency, range.size());
 }
 
 unsigned
@@ -129,11 +133,16 @@ ScratchpadMemory::recvTimingReq(PacketPtr pkt, int portId)
     pkt->headerDelay = pkt->payloadDelay = 0;
 
     Tick duration = pkt->getSize() * bandwidth;
+    Tick portReady = curTick();
     if (duration != 0) {
         auto &relEvent = (portId == PORT_CPU) ? cpuReleaseEvent
                                               : busReleaseEvent;
         schedule(relEvent, curTick() + duration);
         isBusy_[portId] = true;
+        if (singlePort) {
+            portReady = std::max(curTick(), sharedPortBusyUntil);
+            sharedPortBusyUntil = portReady + duration;
+        }
     }
 
     // --- Bank conflict modeling (dual-port SRAM) ---
@@ -151,16 +160,16 @@ ScratchpadMemory::recvTimingReq(PacketPtr pkt, int portId)
     for (unsigned b = startBlock; b <= endBlock; ++b)
         touchedBanks.insert(b % numBanks);
 
-    Tick maxBankReady = curTick();
+    Tick maxBankReady = portReady;
     bool hadConflict = false;
+    const int bankPort = bankPortId(portId);
 
     for (unsigned bank : touchedBanks) {
-        if (bankBusyUntil[bank][portId] > curTick()) {
+        if (bankBusyUntil[bank][bankPort] > portReady) {
             hadConflict = true;
             spmStats.perBankConflicts[bank]++;
         }
-        maxBankReady = std::max(maxBankReady,
-                                bankBusyUntil[bank][portId]);
+        maxBankReady = std::max(maxBankReady, bankBusyUntil[bank][bankPort]);
 
         if (isRead)
             spmStats.perBankReads[bank]++;
@@ -176,7 +185,7 @@ ScratchpadMemory::recvTimingReq(PacketPtr pkt, int portId)
     const Tick totalLatency = effectiveDone - curTick();
 
     for (unsigned bank : touchedBanks)
-        bankBusyUntil[bank][portId] = effectiveDone;
+        bankBusyUntil[bank][bankPort] = effectiveDone;
 
     if (isRead) {
         spmStats.reads++;

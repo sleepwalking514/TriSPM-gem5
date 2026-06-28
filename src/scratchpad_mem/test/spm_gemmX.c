@@ -185,10 +185,7 @@ void blocked_gemm(const int *restrict a, const int *restrict b,
 /* ---------- helpers ---------- */
 
 /*
- * Compiled at O1 to avoid gem5 crash: the O3 auto-vectoriser generates
- * RVV micro-ops (VPinVdMicroInst) that trigger a segfault inside gem5's
- * O3 pipeline when targeting uncacheable DMA-buffer memory.  Since this
- * is only init code (not measured), the lower optimisation level is fine.
+ * Compiled at O1 to keep initialization simple and outside the measured ROI.
  */
 __attribute__((optimize("O1")))
 static void init_block_matrix(int *m)

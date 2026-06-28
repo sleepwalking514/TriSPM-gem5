@@ -6502,6 +6502,7 @@ decode QUADRANT default Unknown::unknown() {
             // The compiler/libspm wrap this in a poll loop for wait-all or
             // watermark waits.
             0x1: SpmDmaWaitOp::spm_dma_w({{
+                spmDmaRecordXspmWait(xc->tcBase());
                 Rd_sd = Mem_sd;
             }});
             // spm.dma.stride rs1, rs2 -- stage strides for next 2D DMA

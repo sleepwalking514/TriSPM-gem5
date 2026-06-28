@@ -87,6 +87,12 @@ class SpmDmaEngine : public ClockedObject
         return descQueue.size() + (state != Idle ? 1 : 0);
     }
 
+    /** Record retired XSPM custom DMA instructions. */
+    void recordXspmDma1D();
+    void recordXspmDmaWait();
+    void recordXspmDmaStride();
+    void recordXspmDma2D();
+
     /**
      * Look up the DMA engine registered for the given System.
      * Returns nullptr if none is registered.
@@ -221,6 +227,13 @@ class SpmDmaEngine : public ClockedObject
         statistics::Scalar waitStallCycles;
         /** Average stall cycles per wait sequence. */
         statistics::Formula avgWaitStallCycles;
+
+        /** XSPM custom instruction execution counters. */
+        statistics::Scalar xspmInsts;
+        statistics::Scalar xspmDma1DInsts;
+        statistics::Scalar xspmDmaWaitInsts;
+        statistics::Scalar xspmDmaStrideInsts;
+        statistics::Scalar xspmDma2DInsts;
     } dmaStats;
 
     Tick handleRead(PacketPtr pkt);

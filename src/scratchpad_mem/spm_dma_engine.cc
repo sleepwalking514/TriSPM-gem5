@@ -216,23 +216,25 @@ SpmDmaEngine::handleWrite(PacketPtr pkt)
         stagedDstStride = (uint64_t)(uint32_t)((val >> 32) & 0xFFFFFFFFull);
         break;
       case REG_LEN: {
-        // Backward compatible LEN trigger.  Lower 32 = LEN (width).
-        // Upper 32, when non-zero, overrides stagedHeight in the same
-        // store — the compiler uses this to skip a separate REG_HEIGHT
-        // write per descriptor.  When upper 32 == 0 we honour the
-        // staged value (legacy code paths still work).
-        uint32_t width = (uint32_t)(val & 0xFFFFFFFFull);
-        uint32_t heightFromHigh = (uint32_t)((val >> 32) & 0xFFFFFFFFull);
-        uint32_t height = heightFromHigh != 0 ? heightFromHigh : stagedHeight;
-        if (!startCopy(stagedSrc, stagedDst, width,
-                       stagedSrcStride, stagedDstStride, height))
-            warn("SpmDmaEngine: descriptor queue full, transfer dropped\n");
-        // Reset staged 2D fields after enqueue so next 1D transfer
-        // doesn't accidentally inherit them.
-        stagedSrcStride = 0;
-        stagedDstStride = 0;
-        stagedHeight = 1;
-        break;
+          // Backward compatible LEN trigger.  Lower 32 = LEN (width).
+          // Upper 32, when non-zero, overrides stagedHeight in the same
+          // store — the compiler uses this to skip a separate REG_HEIGHT
+          // write per descriptor.  When upper 32 == 0 we honour the staged
+          // value so callers can still program REG_HEIGHT separately.
+          uint32_t width = (uint32_t)(val & 0xFFFFFFFFull);
+          uint32_t heightFromHigh = (uint32_t)((val >> 32) & 0xFFFFFFFFull);
+          uint32_t height =
+              heightFromHigh != 0 ? heightFromHigh : stagedHeight;
+          if (!startCopy(stagedSrc, stagedDst, width, stagedSrcStride,
+                         stagedDstStride, height)) {
+              warn("SpmDmaEngine: descriptor queue full, transfer dropped\n");
+          }
+          // Reset staged 2D fields after enqueue so next 1D transfer
+          // doesn't accidentally inherit them.
+          stagedSrcStride = 0;
+          stagedDstStride = 0;
+          stagedHeight = 1;
+          break;
       }
       default:
         warn("SpmDmaEngine: write to unknown offset 0x%x\n", offset);
@@ -566,7 +568,17 @@ SpmDmaEngine::DmaStats::DmaStats(SpmDmaEngine &_engine)
       ADD_STAT(waitStallCycles, statistics::units::Cycle::get(),
                "Total stall cycles across all spm.dma.w wait sequences"),
       ADD_STAT(avgWaitStallCycles, statistics::units::Cycle::get(),
-               "Average stall cycles per spm.dma.w wait sequence")
+               "Average stall cycles per spm.dma.w wait sequence"),
+      ADD_STAT(xspmInsts, statistics::units::Count::get(),
+               "Total XSPM custom DMA instructions executed"),
+      ADD_STAT(xspmDma1DInsts, statistics::units::Count::get(),
+               "XSPM spm.dma 1D enqueue instructions executed"),
+      ADD_STAT(xspmDmaWaitInsts, statistics::units::Count::get(),
+               "XSPM spm.dma.w wait-poll instructions executed"),
+      ADD_STAT(xspmDmaStrideInsts, statistics::units::Count::get(),
+               "XSPM spm.dma.stride instructions executed"),
+      ADD_STAT(xspmDma2DInsts, statistics::units::Count::get(),
+               "XSPM spm.dma.2d enqueue instructions executed")
 {
 }
 
@@ -578,6 +590,34 @@ SpmDmaEngine::DmaStats::regStats()
     avgWaitStallCycles = waitStallCycles / waitPollIdle;
 }
 
+void
+SpmDmaEngine::recordXspmDma1D()
+{
+    dmaStats.xspmInsts++;
+    dmaStats.xspmDma1DInsts++;
+}
+
+void
+SpmDmaEngine::recordXspmDmaWait()
+{
+    dmaStats.xspmInsts++;
+    dmaStats.xspmDmaWaitInsts++;
+}
+
+void
+SpmDmaEngine::recordXspmDmaStride()
+{
+    dmaStats.xspmInsts++;
+    dmaStats.xspmDmaStrideInsts++;
+}
+
+void
+SpmDmaEngine::recordXspmDma2D()
+{
+    dmaStats.xspmInsts++;
+    dmaStats.xspmDma2DInsts++;
+}
+
 // ---- Free functions for ISA instructions ----
 
 bool
@@ -586,6 +626,7 @@ spmDmaStartCopy(ThreadContext *tc, Addr src, Addr dst, uint64_t len)
     auto *eng = SpmDmaEngine::lookup(tc->getSystemPtr());
     panic_if(!eng, "spmDmaStartCopy: no SpmDmaEngine registered "
              "for this System");
+    eng->recordXspmDma1D();
     return eng->startCopy(src, dst, len);
 }
 
@@ -597,6 +638,7 @@ spmDmaStartCopy2D(ThreadContext *tc, Addr src, Addr dst,
     auto *eng = SpmDmaEngine::lookup(tc->getSystemPtr());
     panic_if(!eng, "spmDmaStartCopy2D: no SpmDmaEngine registered "
              "for this System");
+    eng->recordXspmDma2D();
     return eng->startCopy(src, dst, width, srcStride, dstStride, height);
 }
 
@@ -606,6 +648,7 @@ spmDmaSetStride(ThreadContext *tc, uint64_t srcStride, uint64_t dstStride)
     auto *eng = SpmDmaEngine::lookup(tc->getSystemPtr());
     panic_if(!eng, "spmDmaSetStride: no SpmDmaEngine registered "
              "for this System");
+    eng->recordXspmDmaStride();
     eng->setStride(srcStride, dstStride);
 }
 
@@ -618,6 +661,7 @@ spmDmaStartCopy2DStaged(ThreadContext *tc, Addr src, Addr dst,
              "for this System");
     uint64_t srcStr = eng->getStagedSrcStride();
     uint64_t dstStr = eng->getStagedDstStride();
+    eng->recordXspmDma2D();
     return eng->startCopy(src, dst, width, srcStr, dstStr, height);
 }
 
@@ -637,6 +681,15 @@ spmDmaQueueFull(ThreadContext *tc)
     panic_if(!eng, "spmDmaQueueFull: no SpmDmaEngine registered "
              "for this System");
     return eng->queueFull();
+}
+
+void
+spmDmaRecordXspmWait(ThreadContext *tc)
+{
+    auto *eng = SpmDmaEngine::lookup(tc->getSystemPtr());
+    panic_if(!eng, "spmDmaRecordXspmWait: no SpmDmaEngine registered "
+                   "for this System");
+    eng->recordXspmDmaWait();
 }
 
 } // namespace gem5

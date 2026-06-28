@@ -40,6 +40,9 @@ bool spmDmaIsComplete(ThreadContext *tc);
 /** True when the descriptor queue cannot accept more entries. */
 bool spmDmaQueueFull(ThreadContext *tc);
 
+/** Record one executed XSPM wait instruction. */
+void spmDmaRecordXspmWait(ThreadContext *tc);
+
 constexpr uint64_t SPM_DMA_STATUS_ADDR = 0xF0000018ULL;
 
 } // namespace gem5

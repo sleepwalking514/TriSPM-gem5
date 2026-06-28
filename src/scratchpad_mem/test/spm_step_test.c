@@ -20,36 +20,28 @@ static int step0_printf_only(void)
 
 static int step1_env_vars(void)
 {
-    step_marker("step1: reading env vars ...");
+    step_marker("step1: reading SPM env vars ...");
 
     size_t spm_sz = get_spm_size();
     printf("  SPM_SIZE_BYTES = %lu\n", (unsigned long)spm_sz);
     fflush(stdout);
 
-    uintptr_t dma_base = get_dma_buf_base();
-    printf("  DMA_BUF_BASE   = 0x%lx\n", (unsigned long)dma_base);
-    fflush(stdout);
-
-    size_t dma_sz = get_dma_buf_size();
-    printf("  DMA_BUF_SIZE   = %lu\n", (unsigned long)dma_sz);
-    fflush(stdout);
-
-    return (spm_sz == 0 || dma_base == 0 || dma_sz == 0) ? 1 : 0;
+    return (spm_sz == 0) ? 1 : 0;
 }
 
 static int step2_spm_alloc(void)
 {
-    step_marker("step2: spm_malloc + dma_buf_malloc ...");
+    step_marker("step2: spm_malloc + DRAM allocation ...");
 
     int *spm_ptr = (int *)spm_malloc(N * sizeof(int));
     printf("  spm_malloc  -> %p\n", (void *)spm_ptr);
     fflush(stdout);
 
-    int *dma_ptr = (int *)dma_buf_malloc(N * sizeof(int));
-    printf("  dma_buf_malloc -> %p\n", (void *)dma_ptr);
+    int *dram_ptr = (int *)dma_buf_malloc(N * sizeof(int));
+    printf("  dma_buf_malloc -> %p\n", (void *)dram_ptr);
     fflush(stdout);
 
-    return (spm_ptr == NULL || dma_ptr == NULL) ? 1 : 0;
+    return (spm_ptr == NULL || dram_ptr == NULL) ? 1 : 0;
 }
 
 static int step3_spm_write_read(void)
@@ -75,18 +67,19 @@ static int step3_spm_write_read(void)
     return fail;
 }
 
-static int step4_dma_buf_write_read(void)
+static int
+step4_dram_write_read(void)
 {
-    step_marker("step4: DMA buffer write/read ...");
+    step_marker("step4: DRAM buffer write/read ...");
 
     int *buf = (int *)dma_buf_malloc(N * sizeof(int));
     if (!buf) { printf("  dma_buf_malloc failed\n"); fflush(stdout); return 1; }
 
-    step_marker("step4a: writing to DMA buffer");
+    step_marker("step4a: writing to DRAM buffer");
     for (int i = 0; i < N; i++)
         buf[i] = 100 + i;
 
-    step_marker("step4b: reading from DMA buffer");
+    step_marker("step4b: reading from DRAM buffer");
     int fail = 0;
     for (int i = 0; i < N; i++) {
         if (buf[i] != 100 + i) {
@@ -227,7 +220,7 @@ int main(void)
     printf("  => %s\n\n", rc ? "FAIL" : "PASS"); fflush(stdout);
     total += rc;
 
-    rc = step4_dma_buf_write_read();
+    rc = step4_dram_write_read();
     printf("  => %s\n\n", rc ? "FAIL" : "PASS"); fflush(stdout);
     total += rc;
 

@@ -79,11 +79,13 @@ class ScratchpadMemory : public AbstractMemory
     const Tick latency;
     const Tick latencyVar;
     const double bandwidth;
+    const bool singlePort;
 
     const unsigned numBanks;
     const unsigned bankIntlvSize;
 
     std::vector<std::array<Tick, NUM_PORTS>> bankBusyUntil;
+    Tick sharedPortBusyUntil;
 
     std::list<DeferredPacket> packetQueue;
 
@@ -102,6 +104,11 @@ class ScratchpadMemory : public AbstractMemory
 
     Tick getLatency() const;
     unsigned addrToBank(Addr addr) const;
+    int
+    bankPortId(int portId) const
+    {
+        return singlePort ? PORT_BUS : portId;
+    }
 
     std::unique_ptr<Packet> pendingDelete;
 
