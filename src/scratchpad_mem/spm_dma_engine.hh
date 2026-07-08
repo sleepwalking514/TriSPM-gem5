@@ -53,8 +53,9 @@ class SpmDmaEngine : public ClockedObject
     DrainState drain() override;
 
     /**
-     * Enqueue a DMA transfer.  Returns true if successfully queued,
-     * false if the descriptor queue is full (caller should retry).
+     * Enqueue a DMA transfer.  The current software interfaces do not
+     * implement enqueue retry, so a full descriptor queue is a fatal
+     * configuration/programming error instead of a dropped transfer.
      *
      * 1D form: startCopy(src, dst, len) — len contiguous bytes.
      * 2D form: startCopy(src, dst, width, srcStride, dstStride, height)
@@ -150,6 +151,8 @@ class SpmDmaEngine : public ClockedObject
     Addr pioSize;
     Tick pioDelay;
     Tick descLatency;
+    Addr spmAddr;
+    Addr spmSize;
 
     // ---- Descriptor queue ----
     std::deque<Descriptor> descQueue;
@@ -252,13 +255,23 @@ class SpmDmaEngine : public ClockedObject
     // SE-mode VA→PA translation via the process page table.
     Addr translateAddr(Addr vaddr);
 
+    bool rangeInSpm(Addr vaddr, uint64_t len) const;
+    bool rangeOverlapsSpm(Addr vaddr, uint64_t len) const;
+
     // Issue a DMA read/write that may span multiple virtual pages.
     // The engine splits the request at VA page boundaries (4 KiB) and
     // translates each chunk separately, because consecutive VAs do not
     // necessarily map to consecutive PAs.  All sub-actions complete the
     // same `doneEvent` after the last one finishes.
     void issuePagedDmaAction(Packet::Command cmd, Addr vaddr, uint64_t len,
-                             EventFunctionWrapper *doneEvent, uint8_t *buf);
+                             EventFunctionWrapper *doneEvent, uint8_t *buf,
+                             Request::Flags flags = 0);
+
+    // DMA writes to cacheable DRAM must invalidate possible CPU cache copies
+    // before the data write, otherwise stale or dirty lines can survive above
+    // the DMA agent in the classic cache hierarchy.
+    void issueCoherentWrite(Addr vaddr, uint64_t len,
+                            EventFunctionWrapper *doneEvent, uint8_t *buf);
 };
 
 } // namespace gem5

@@ -16,12 +16,14 @@ class ThreadContext;
  * System that owns the calling ThreadContext.
  */
 
-/** Enqueue a 1D DMA transfer.  Returns false if the descriptor queue is full. */
+/** Enqueue a 1D DMA transfer.  Queue full is fatal in the current model. */
 bool spmDmaStartCopy(ThreadContext *tc, Addr src, Addr dst, uint64_t len);
 
-/** Enqueue a 2D strided DMA transfer.  Returns false if queue is full.
- *  Copies height rows of width bytes, advancing src by srcStride and
- *  dst by dstStride per row. */
+/**
+ * Enqueue a 2D strided DMA transfer.  Queue full is fatal in the current
+ * model.  Copies height rows of width bytes, advancing src by srcStride
+ * and dst by dstStride per row.
+ */
 bool spmDmaStartCopy2D(ThreadContext *tc, Addr src, Addr dst,
                        uint64_t width, uint32_t height,
                        uint64_t srcStride, uint64_t dstStride);

@@ -105,21 +105,30 @@ SpmDmaEngine::SpmDmaEngine(const Params &p)
       pioSize(p.pio_size),
       pioDelay(p.pio_latency),
       descLatency(p.desc_latency),
+      spmAddr(p.spm_addr),
+      spmSize(p.spm_size),
       maxDescriptors(p.max_descriptors),
       state(Idle),
-      curSrc(0), curDst(0), curLen(0),
+      curSrc(0),
+      curDst(0),
+      curLen(0),
       buffer(nullptr),
-      curHeight(1), curSrcStride(0), curDstStride(0),
+      curHeight(1),
+      curSrcStride(0),
+      curDstStride(0),
       rowsWriteComplete(0),
-      stagedSrc(0), stagedDst(0),
-      stagedSrcStride(0), stagedDstStride(0), stagedHeight(1),
+      stagedSrc(0),
+      stagedDst(0),
+      stagedSrcStride(0),
+      stagedDstStride(0),
+      stagedHeight(1),
       transferStartTick(0),
       waitStartTick(0),
-      beginReadEvent([this]{ beginRead(); }, name() + ".beginRead"),
-      readDoneEvent([this]{ readDone(); }, name() + ".readDone"),
-      writeDoneEvent([this]{ writeDone(); }, name() + ".writeDone"),
-      beginPipelinedReadEvent([this]{ beginPipelinedRead(); },
-                               name() + ".beginPipelinedRead"),
+      beginReadEvent([this] { beginRead(); }, name() + ".beginRead"),
+      readDoneEvent([this] { readDone(); }, name() + ".readDone"),
+      writeDoneEvent([this] { writeDone(); }, name() + ".writeDone"),
+      beginPipelinedReadEvent([this] { beginPipelinedRead(); },
+                              name() + ".beginPipelinedRead"),
       dmaStats(*this)
 {
     panic_if(maxDescriptors == 0, "max_descriptors must be > 0");
@@ -225,10 +234,8 @@ SpmDmaEngine::handleWrite(PacketPtr pkt)
           uint32_t heightFromHigh = (uint32_t)((val >> 32) & 0xFFFFFFFFull);
           uint32_t height =
               heightFromHigh != 0 ? heightFromHigh : stagedHeight;
-          if (!startCopy(stagedSrc, stagedDst, width, stagedSrcStride,
-                         stagedDstStride, height)) {
-              warn("SpmDmaEngine: descriptor queue full, transfer dropped\n");
-          }
+          startCopy(stagedSrc, stagedDst, width, stagedSrcStride,
+                    stagedDstStride, height);
           // Reset staged 2D fields after enqueue so next 1D transfer
           // doesn't accidentally inherit them.
           stagedSrcStride = 0;
@@ -258,7 +265,10 @@ SpmDmaEngine::startCopy(Addr src, Addr dst, uint64_t len,
         dmaStats.queueFullStalls++;
         DPRINTF(SpmDma, "Queue full (%d/%d), rejecting src=0x%x dst=0x%x "
                 "len=%d\n", descQueue.size(), maxDescriptors, src, dst, len);
-        return false;
+        panic("SpmDmaEngine: descriptor queue full (%d/%d), cannot enqueue "
+              "src=0x%x dst=0x%x len=%d; wait for DMA completion or reduce "
+              "the enqueue window\n",
+              descQueue.size(), maxDescriptors, src, dst, len);
     }
 
     descQueue.push_back({src, dst, len, srcStride, dstStride, height});
@@ -350,6 +360,33 @@ SpmDmaEngine::translateAddr(Addr vaddr)
     return paddr;
 }
 
+bool
+SpmDmaEngine::rangeInSpm(Addr vaddr, uint64_t len) const
+{
+    if (len == 0) {
+        return false;
+    }
+    if (spmSize == 0 || vaddr < spmAddr) {
+        return false;
+    }
+    Addr off = vaddr - spmAddr;
+    return off < spmSize && len <= spmSize - off;
+}
+
+bool
+SpmDmaEngine::rangeOverlapsSpm(Addr vaddr, uint64_t len) const
+{
+    if (len == 0 || spmSize == 0) {
+        return false;
+    }
+
+    Addr spmEnd = spmAddr + spmSize;
+    Addr end = vaddr + len;
+    panic_if(end < vaddr || spmEnd < spmAddr,
+             "SpmDmaEngine: address range overflow\n");
+    return vaddr < spmEnd && spmAddr < end;
+}
+
 // Split a DMA action that spans multiple VA pages into one sub-action per
 // page, because gem5 SE mode allocates physical pages from a free pool and
 // consecutive VAs are not guaranteed to map to consecutive PAs.  Each
@@ -357,9 +394,9 @@ SpmDmaEngine::translateAddr(Addr vaddr)
 // schedules it.
 void
 SpmDmaEngine::issuePagedDmaAction(Packet::Command cmd, Addr vaddr,
-                                   uint64_t len,
-                                   EventFunctionWrapper *doneEvent,
-                                   uint8_t *buf)
+                                  uint64_t len,
+                                  EventFunctionWrapper *doneEvent,
+                                  uint8_t *buf, Request::Flags flags)
 {
     constexpr uint64_t PAGE_SIZE = 4096;
 
@@ -377,8 +414,8 @@ SpmDmaEngine::issuePagedDmaAction(Packet::Command cmd, Addr vaddr,
 
     // Fast path: single chunk → reuse the original event directly.
     if (chunks.size() == 1) {
-        dmaPort.dmaAction(cmd, chunks[0].pa, chunks[0].bytes,
-                          doneEvent, buf + chunks[0].bufOff, 0);
+        dmaPort.dmaAction(cmd, chunks[0].pa, chunks[0].bytes, doneEvent,
+                          buf ? buf + chunks[0].bufOff : nullptr, 0, flags);
         return;
     }
 
@@ -398,8 +435,46 @@ SpmDmaEngine::issuePagedDmaAction(Packet::Command cmd, Addr vaddr,
             },
             name() + ".subDmaAction",
             /*del=*/true);
-        dmaPort.dmaAction(cmd, c.pa, c.bytes, subEvent, buf + c.bufOff, 0);
+        dmaPort.dmaAction(cmd, c.pa, c.bytes, subEvent,
+                          buf ? buf + c.bufOff : nullptr, 0, flags);
     }
+}
+
+void
+SpmDmaEngine::issueCoherentWrite(Addr vaddr, uint64_t len,
+                                 EventFunctionWrapper *doneEvent, uint8_t *buf)
+{
+    if (rangeInSpm(vaddr, len)) {
+        issuePagedDmaAction(MemCmd::WriteReq, vaddr, len, doneEvent, buf);
+        return;
+    }
+
+    panic_if(rangeOverlapsSpm(vaddr, len),
+             "SpmDmaEngine: DMA write crosses the SPM boundary "
+             "(VA 0x%x len=%d)\n",
+             vaddr, len);
+
+    const Addr lineSize = system->cacheLineSize();
+    const Addr lineMask = lineSize - 1;
+    panic_if((lineSize & lineMask) != 0,
+             "SpmDmaEngine: cache line size must be a power of two\n");
+
+    const Addr cleanStart = vaddr & ~lineMask;
+    const Addr cleanEnd = (vaddr + len + lineMask) & ~lineMask;
+    panic_if(cleanEnd < cleanStart,
+             "SpmDmaEngine: cache maintenance range overflow\n");
+
+    auto *cleanDone = new EventFunctionWrapper(
+        [this, vaddr, len, doneEvent, buf]() {
+            issuePagedDmaAction(MemCmd::WriteReq, vaddr, len, doneEvent, buf);
+        },
+        name() + ".cleanInvalidDone",
+        /*del=*/true);
+
+    Request::Flags cleanFlags =
+        Request::CLEAN | Request::INVALIDATE | Request::DST_POC;
+    issuePagedDmaAction(MemCmd::CleanInvalidReq, cleanStart,
+                        cleanEnd - cleanStart, cleanDone, nullptr, cleanFlags);
 }
 
 // ---- 1D path ----
@@ -421,8 +496,7 @@ SpmDmaEngine::readDone()
             curLen, curDst,
             curLen >= 4 ? *(uint32_t *)buffer : 0);
     state = Writing;
-    issuePagedDmaAction(MemCmd::WriteReq, curDst, curLen,
-                        &writeDoneEvent, buffer);
+    issueCoherentWrite(curDst, curLen, &writeDoneEvent, buffer);
 }
 
 void
@@ -462,8 +536,8 @@ SpmDmaEngine::pipelinedRowReadDone(int row)
     DPRINTF(SpmDma, "pipelinedRowReadDone: row %d/%d, writing %d bytes "
             "to dst VA=0x%x\n", row, curHeight, curLen, rowDst);
 
-    issuePagedDmaAction(MemCmd::WriteReq, rowDst, curLen,
-                        rowWriteDoneEvents[row], rowBuffers[row]);
+    issueCoherentWrite(rowDst, curLen, rowWriteDoneEvents[row],
+                       rowBuffers[row]);
 }
 
 void

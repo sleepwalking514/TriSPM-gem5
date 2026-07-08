@@ -140,6 +140,8 @@ class SPMSystem(System):
                 pio_latency=dma_pio_latency,
                 desc_latency=dma_desc_latency,
                 max_descriptors=dma_max_descriptors,
+                spm_addr=self._spm_start_addr,
+                spm_size=self._spm_size_val,
             )
             self.spm_dma.pio = self.l2bus.mem_side_ports
             self.spm_dma.dma = self.l2bus.cpu_side_ports
